@@ -89,6 +89,15 @@ export class DefaultExecutor extends BaseExecutor {
         delete transformed.client_metadata;
       }
       stripUnsupportedParams(this.provider, model, transformed);
+
+      // Connection opt-in service tier (DeepInfra flex): when the connection
+      // enables it and the client didn't choose a tier, inject the
+      // registry-declared value so the request gets the discounted tier.
+      if (transformed.service_tier === undefined
+        && this.config.quirks?.connectionServiceTier !== undefined
+        && credentials?.providerSpecificData?.flexServiceTier === true) {
+        transformed.service_tier = this.config.quirks.connectionServiceTier;
+      }
     }
 
     return injectReasoningContent({ provider: this.provider, model, body: transformed });

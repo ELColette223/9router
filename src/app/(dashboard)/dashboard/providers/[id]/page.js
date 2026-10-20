@@ -68,6 +68,7 @@ export default function ProviderDetailPage() {
   const [selectedConnectionIds, setSelectedConnectionIds] = useState([]);
   const [bulkProxyPoolId, setBulkProxyPoolId] = useState("__none__");
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
+  const [flexUpdatingId, setFlexUpdatingId] = useState(null);
   const [providerStrategy, setProviderStrategy] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
@@ -158,6 +159,7 @@ export default function ProviderDetailPage() {
   const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
+  const supportsFlexTier = providerInfo?.flexServiceTier === true;
   const staticModels = getModelsByProviderId(providerId);
   const models = (providerId === "cursor" || providerId === "zed") && liveModels.length > 0
     ? liveModels
@@ -1022,6 +1024,29 @@ export default function ProviderDetailPage() {
     return applyProxyAssignments(targets);
   };
 
+  const handleToggleFlexTier = async (conn) => {
+    const next = !(conn.providerSpecificData?.flexServiceTier === true);
+    setFlexUpdatingId(conn.id);
+    try {
+      const res = await fetch(`/api/providers/${conn.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerSpecificData: { flexServiceTier: next } }),
+      });
+      if (res.ok) {
+        setConnections(prev => prev.map(c =>
+          c.id === conn.id
+            ? { ...c, providerSpecificData: { ...c.providerSpecificData, flexServiceTier: next } }
+            : c
+        ));
+      }
+    } catch (error) {
+      console.log("Error updating flex tier:", error);
+    } finally {
+      setFlexUpdatingId(null);
+    }
+  };
+
 
   const isSelected = (connectionId) => selectedConnectionIds.includes(connectionId);
 
@@ -1080,6 +1105,11 @@ export default function ProviderDetailPage() {
                 }}
                 onDelete={() => handleDelete(conn.id)}
                 oneByOneStatus={oneByOneResults[conn.id] || null}
+                flex={supportsFlexTier ? {
+                  enabled: conn.providerSpecificData?.flexServiceTier === true,
+                  updating: flexUpdatingId === conn.id,
+                  onToggle: () => handleToggleFlexTier(conn),
+                } : null}
               />
             </div>
           </div>

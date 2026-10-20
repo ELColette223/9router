@@ -18,16 +18,25 @@ export default {
   },
   category: "apikey",
   authType: "apikey",
+  // UI gate for the per-connection Flex toggle; wire value lives in
+  // transport.quirks.connectionServiceTier.
+  flexServiceTier: true,
   transport: {
     baseUrl: "https://api.deepinfra.com/v1/openai/chat/completions",
     validateUrl: "https://api.deepinfra.com/v1/openai/models",
+    quirks: {
+      // service_tier value injected when a connection opts into the Flex tier
+      // (providerSpecificData.flexServiceTier) and the client sent no tier.
+      connectionServiceTier: "flex",
+    },
   },
   // Flex service tier: opt in per request with the OpenAI-standard
   // `"service_tier": "flex"` body field — 0.8× token price for best-effort
   // scheduling (waits up to 10 min under load, then HTTP 429, unbilled).
-  // No router toggle needed: openai→openai requests skip translation and no
-  // strip rule drops service_tier, so the field reaches DeepInfra verbatim.
-  // Models without the tier serve at standard price and echo
+  // Clients can send service_tier themselves (openai→openai requests skip
+  // translation and no strip rule drops it), or flip the per-connection
+  // Flex toggle in the dashboard to have the executor inject it. Models
+  // without the tier serve at standard price and echo
   // `service_tier: "default"` back in the response.
   // The live catalogue is public — /models answers 200 without a key and 401
   // with a bad one, so validateUrl doubles as the key probe.

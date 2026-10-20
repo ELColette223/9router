@@ -129,3 +129,54 @@ describe("deepinfra flex service tier", () => {
     expect(transformed.service_tier).toBeUndefined();
   });
 });
+
+describe("deepinfra connection-level flex toggle", () => {
+  const plainBody = () => ({
+    model: "deepseek-ai/DeepSeek-V3.2",
+    messages: [{ role: "user", content: "hi" }],
+  });
+  const executor = () => new DefaultExecutor("deepinfra");
+
+  it("declares the UI gate and the wire value", () => {
+    expect(entry.flexServiceTier).toBe(true);
+    expect(PROVIDERS.deepinfra.quirks.connectionServiceTier).toBe("flex");
+  });
+
+  it("injects the tier when the connection opts in and the client sent none", () => {
+    const transformed = executor().transformRequest("deepseek-ai/DeepSeek-V3.2", plainBody(), true, {
+      apiKey: "k",
+      providerSpecificData: { flexServiceTier: true },
+    });
+    expect(transformed.service_tier).toBe("flex");
+  });
+
+  it("does not inject when the toggle is off or missing", () => {
+    for (const credentials of [
+      { apiKey: "k" },
+      { apiKey: "k", providerSpecificData: {} },
+      { apiKey: "k", providerSpecificData: { flexServiceTier: false } },
+    ]) {
+      const transformed = executor().transformRequest("deepseek-ai/DeepSeek-V3.2", plainBody(), true, credentials);
+      expect(transformed.service_tier).toBeUndefined();
+    }
+  });
+
+  it("lets an explicit client tier win over the connection opt-in", () => {
+    const transformed = executor().transformRequest("deepseek-ai/DeepSeek-V3.2", {
+      ...plainBody(),
+      service_tier: "standard",
+    }, true, {
+      apiKey: "k",
+      providerSpecificData: { flexServiceTier: true },
+    });
+    expect(transformed.service_tier).toBe("standard");
+  });
+
+  it("wires the toggle into the dashboard connection row", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const read = (p) => readFileSync(join(here, "..", "..", p), "utf8");
+    expect(read("src/shared/constants/providers.js")).toContain("flexServiceTier ? { flexServiceTier: true }");
+    expect(read("src/app/(dashboard)/dashboard/providers/[id]/page.js")).toContain("handleToggleFlexTier");
+    expect(read("src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js")).toContain("flex.onToggle");
+  });
+});
