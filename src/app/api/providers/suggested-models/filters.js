@@ -57,4 +57,16 @@ export const FILTERS = {
       .sort((a, b) => String(a.id).localeCompare(String(b.id))),
 
   "nous-free": normalizeNousFreeModels,
+
+  // DeepInfra catalogue — /models also lists embedding/tts/stt/image services;
+  // metadata.tags separates them ("chat" = text-capable).
+  "deepinfra": (models) =>
+    (Array.isArray(models) ? models : [])
+      .filter((m) => typeof m?.id === "string" && Array.isArray(m?.metadata?.tags) && m.metadata.tags.includes("chat"))
+      .map((m) => ({
+        id: m.id,
+        name: m.id.split("/").pop() || m.id,
+        contextLength: Number(m?.metadata?.context_length) || undefined,
+      }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id))),
 };
