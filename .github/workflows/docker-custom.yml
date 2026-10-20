@@ -11,6 +11,7 @@ name: Build and Publish Custom Image
 on:
   push:
     branches:
+      - develop
       - master
   workflow_dispatch:
 
@@ -50,7 +51,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            # Deployment branch tracks :latest; the fork's default branch (master)
+            # only receives tags when the branch is explicitly pushed.
+            type=raw,value=latest,enable=${{ github.ref_name == 'develop' || github.ref_name == 'master' }}
             type=sha,prefix=
 
       - name: Build and push
