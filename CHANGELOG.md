@@ -1,3 +1,9 @@
+# v0.5.105 (2026-10-20)
+
+## Features
+- **DeepInfra**: add DeepInfra (`di`) provider — paid OpenAI-compatible API-key provider with 14 curated chat models, public-catalogue model discovery (chat-capable suggested models, passthrough for the rest), key validation via the `/models` 401 probe, and the official logo
+- **DeepInfra**: per-connection Flex service tier toggle — dashboard action stores the opt-in on the connection; the gateway injects `service_tier: "flex"` (0.8x price, best-effort scheduling) when the client sent no tier, and an explicit client tier always wins
+
 # v0.5.104 (2026-10-15)
 
 ## Features
