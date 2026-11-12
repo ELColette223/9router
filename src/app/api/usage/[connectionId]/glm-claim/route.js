@@ -66,6 +66,7 @@ export async function POST(request, { params }) {
             available: false,
             lastClaimedAt: new Date().toISOString(),
             lastError: null,
+            planId,
             planName: result.plan?.name ?? weekendName,
             endsAt: result.plan?.endsAt ?? psd.zcodeClaimState?.endsAt ?? null,
           },

@@ -508,6 +508,8 @@ describe("glm-claim route", () => {
     expect(claimState.lastClaimedAt).toBe(new Date(NOW).toISOString());
     expect(claimState.lastError).toBeNull();
     expect(claimState.planName).toBe("ZCode Weekend Build");
+    // Controller ruling: manual claim persists the claimed planId, like auto-claim.
+    expect(claimState.planId).toBe("w1");
     expect(claimState.endsAt).toBe(1763251200);
     // Full merged providerSpecificData: existing fields survive the write.
     expect(payload.providerSpecificData.zcodeJwtToken).toBe("jwt");
@@ -536,6 +538,8 @@ describe("glm-claim route", () => {
     expect(fetchZcodeClaimPreview).not.toHaveBeenCalled();
     expect(claimZcodePlan).toHaveBeenCalledTimes(1);
     expect(claimZcodePlan.mock.calls[0][0]).toMatchObject({ zcodeJwt: "jwt", planId: "w1" });
+    const payload = updateProviderConnection.mock.calls.at(-1)[1];
+    expect(payload.providerSpecificData.zcodeClaimState.planId).toBe("w1");
   });
 
   it("returns business failure as 200 with the server message", async () => {
