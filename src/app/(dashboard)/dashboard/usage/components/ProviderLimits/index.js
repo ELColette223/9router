@@ -164,6 +164,7 @@ export default function ProviderLimits() {
   const [errors, setErrors] = useState({});
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [autoPingConfigs, setAutoPingConfigs] = useState({ claude: {}, codex: {} });
+  const [glmAutoClaimCfg, setGlmAutoClaimCfg] = useState({});
   const [scheduleConnection, setScheduleConnection] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [hasHydratedAutoRefresh, setHasHydratedAutoRefresh] = useState(false);
@@ -174,6 +175,8 @@ export default function ProviderLimits() {
   const [togglingId, setTogglingId] = useState(null);
   const [resettingLimitId, setResettingLimitId] = useState(null);
   const [resetConfirmState, setResetConfirmState] = useState(null);
+  const [claimingId, setClaimingId] = useState(null);
+  const [claimConfirmState, setClaimConfirmState] = useState(null);
   const [resetCreditsState, setResetCreditsState] = useState(null);
   const [showEditModal, setShowEditModal] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState(null);
@@ -384,6 +387,74 @@ export default function ProviderLimits() {
       }
     },
     [fetchQuota, resettingLimitId, quotaData],
+  );
+
+  // GLM Zcode reset consumption is irreversible; the route reconciles pending
+  // attempts server-side. Always force-refresh afterwards (even on failure) so
+  // the row shows the reconciled state. The error is applied after the refresh
+  // because fetchQuota clears the row error when it starts.
+  const handleGlmReset = useCallback(
+    async (connectionId, resetType) => {
+      if (resettingLimitId) return;
+
+      setResettingLimitId(connectionId);
+      setErrors((prev) => ({ ...prev, [connectionId]: null }));
+
+      let resetError = null;
+      try {
+        const response = await fetch(`/api/usage/${connectionId}/glm-reset`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ resetType }),
+        });
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || !result.ok) {
+          const message = result.message || result.error || "Failed to reset GLM quota";
+          resetError = result.uncertain ? `${message} You can retry safely.` : message;
+        }
+      } catch (error) {
+        resetError = error.message || "Failed to reset GLM quota";
+      } finally {
+        await fetchQuota(connectionId, "glm", { force: true });
+        setLastUpdated(new Date());
+        if (resetError) {
+          setErrors((prev) => ({ ...prev, [connectionId]: resetError }));
+        }
+        setResettingLimitId(null);
+      }
+    },
+    [fetchQuota, resettingLimitId],
+  );
+
+  const handleGlmClaim = useCallback(
+    async (connectionId, planId) => {
+      if (claimingId) return;
+
+      setClaimingId(connectionId);
+      setErrors((prev) => ({ ...prev, [connectionId]: null }));
+
+      try {
+        const response = await fetch(`/api/usage/${connectionId}/glm-claim`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ planId }),
+        });
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok || !result.success) {
+          throw new Error(result.message || result.error || "Failed to claim weekend plan");
+        }
+
+        await fetchQuota(connectionId, "glm", { force: true });
+        setLastUpdated(new Date());
+      } catch (error) {
+        setErrors((prev) => ({ ...prev, [connectionId]: error.message || "Failed to claim weekend plan" }));
+      } finally {
+        setClaimingId(null);
+      }
+    },
+    [claimingId, fetchQuota],
   );
 
   // Claude grants already arrive with the usage read; no extra fetch
@@ -600,7 +671,7 @@ export default function ProviderLimits() {
     window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(autoRefresh));
   }, [autoRefresh, hasHydratedAutoRefresh]);
 
-  // Load auto-ping per-connection configs
+  // Load auto-ping per-connection configs and the GLM auto-claim config
   useEffect(() => {
     fetch("/api/settings", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : {}))
@@ -609,6 +680,7 @@ export default function ProviderLimits() {
           claude: s?.claudeAutoPing || {},
           codex: s?.codexAutoPing || {},
         });
+        setGlmAutoClaimCfg(s?.glmAutoClaim || {});
         setQuotaVisibility(s?.quotaVisibility || {});
       })
       .catch(() => {});
@@ -645,6 +717,36 @@ export default function ProviderLimits() {
       setAutoPingConfigs(previous);
     }
   }, [autoPingConfigs]);
+
+  // GLM auto-claim defaults ON: a missing per-connection flag means enabled
+  // (matches the backend gate `!== false`). Optimistic update, then
+  // read-modify-write the settings; roll back on failure.
+  const handleToggleGlmAutoClaim = useCallback(async (connectionId) => {
+    const previous = glmAutoClaimCfg;
+    const isEnabled = glmAutoClaimCfg.connections?.[connectionId] !== false;
+    const nextCfg = {
+      ...glmAutoClaimCfg,
+      connections: { ...(glmAutoClaimCfg.connections || {}), [connectionId]: !isEnabled },
+    };
+    setGlmAutoClaimCfg(nextCfg);
+
+    try {
+      const r = await fetch("/api/settings", { cache: "no-store" });
+      const s = r.ok ? await r.json() : {};
+      const fullCfg = {
+        ...(s?.glmAutoClaim || {}),
+        connections: nextCfg.connections,
+      };
+      const response = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ glmAutoClaim: fullCfg }),
+      });
+      if (!response.ok) throw new Error("Failed to update auto-claim setting");
+    } catch {
+      setGlmAutoClaimCfg(previous);
+    }
+  }, [glmAutoClaimCfg]);
 
   const updateQuotaVisibility = useCallback(async (nextVisibility, previousVisibility) => {
     setQuotaVisibility(nextVisibility);
@@ -1125,10 +1227,11 @@ export default function ProviderLimits() {
           const isInactive = conn.isActive === false;
           const isCodex = conn.provider === "codex";
           const claudeReset = conn.provider === "claude" ? quota?.raw?.resetCredits : null;
+          const glmZcode = conn.provider === "glm" && conn.authType === "oauth" ? quota?.raw?.zcode : null;
           const resetLabel = isCodex ? "Codex reset credit" : "Claude limit reset";
           const resetCreditCount = getCodexResetCreditCount(quota);
           const isResettingLimit = resettingLimitId === conn.id;
-          const rowBusy = deletingId === conn.id || togglingId === conn.id || isResettingLimit;
+          const rowBusy = deletingId === conn.id || togglingId === conn.id || isResettingLimit || claimingId === conn.id;
           const rawQuotas = quota?.quotas || [];
           const visibleQuotas = filterQuotasByVisibility(conn.provider, rawQuotas, quotaVisibility);
           const hiddenQuotaRows = getHiddenQuotaRows(conn.provider, rawQuotas, quotaVisibility);
@@ -1256,6 +1359,70 @@ export default function ProviderLimits() {
                         </Tooltip>
                       </>
                     )}
+                    {glmZcode && [
+                      { resetType: "FIVE_HOUR", bucket: glmZcode.resets?.fiveHour, label: "5-hour" },
+                      { resetType: "WEEK", bucket: glmZcode.resets?.week, label: "weekly" },
+                    ].map(({ resetType, bucket, label }) => {
+                      const glmResetCount = bucket?.count ?? 0;
+                      if (glmResetCount <= 0) return null;
+                      const glmResetTooltip = `Reset ${label} quota (${glmResetCount} available)`;
+                      return (
+                        <Tooltip key={resetType} text={glmResetTooltip}>
+                          <button
+                            type="button"
+                            onClick={() => setResetConfirmState({ connection: conn, resetType, resetCreditCount: glmResetCount, glm: true })}
+                            disabled={isLoading || rowBusy}
+                            aria-label={glmResetTooltip}
+                            className={`flex h-8 min-w-10 items-center justify-center gap-1 rounded-lg border px-2 text-[11px] font-medium tabular-nums transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/60 disabled:cursor-not-allowed disabled:opacity-60 ${
+                              glmResetCount > 0
+                                ? "border-primary/30 bg-primary/5 text-primary hover:bg-primary/10"
+                                : "border-black/10 bg-black/[0.02] text-text-muted dark:border-white/10 dark:bg-white/[0.03]"
+                            }`}
+                          >
+                            <span className={`material-symbols-outlined text-[15px] ${isResettingLimit ? "animate-spin" : ""}`}>
+                              {isResettingLimit ? "progress_activity" : "restart_alt"}
+                            </span>
+                            <span>{glmResetCount}</span>
+                          </button>
+                        </Tooltip>
+                      );
+                    })}
+                    {glmZcode?.claim?.available && (
+                      <Tooltip text={`Claim ${glmZcode.claim.planName || "weekend plan"}`}>
+                        <button
+                          type="button"
+                          onClick={() => setClaimConfirmState({ connection: conn, planId: glmZcode.claim.planId, planName: glmZcode.claim.planName })}
+                          disabled={isLoading || rowBusy}
+                          aria-label={`Claim ${glmZcode.claim.planName || "weekend plan"}`}
+                          className="flex h-8 items-center justify-center gap-1 rounded-lg border border-primary/30 bg-primary/5 px-2 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary/60 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <span className={`material-symbols-outlined text-[15px] ${claimingId === conn.id ? "animate-spin" : ""}`}>
+                            {claimingId === conn.id ? "progress_activity" : "redeem"}
+                          </span>
+                          <span>Claim</span>
+                        </button>
+                      </Tooltip>
+                    )}
+                    {conn.provider === "glm" && conn.authType === "oauth" && (() => {
+                      const autoClaimEnabled = glmAutoClaimCfg.connections?.[conn.id] !== false;
+                      const autoClaimLabel = autoClaimEnabled
+                        ? "Auto-claim weekend plan"
+                        : "Auto-claim weekend plan (disabled)";
+                      return (
+                        <Tooltip text={autoClaimLabel}>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleGlmAutoClaim(conn.id)}
+                            disabled={isLoading || rowBusy}
+                            aria-label={autoClaimLabel}
+                            aria-pressed={autoClaimEnabled}
+                            className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 ${autoClaimEnabled ? "text-primary" : "text-text-muted"}`}
+                          >
+                            <span className="material-symbols-outlined text-[18px]">autorenew</span>
+                          </button>
+                        </Tooltip>
+                      );
+                    })()}
                     {AUTO_PING_SETTINGS_KEYS[conn.provider] && conn.authType === "oauth" && (() => {
                       const cfg = autoPingConfigs[conn.provider] || {};
                       const isReactive = cfg.connections?.[conn.id] === true;
@@ -1383,6 +1550,16 @@ export default function ProviderLimits() {
                     }
                     onHideQuota={(quotaRow) => handleHideQuota(conn.provider, quotaRow)}
                   />
+                )}
+                {glmZcode?.sessionExpired && (
+                  <p className="mt-2 px-1 text-[10px] leading-relaxed text-amber-600 dark:text-amber-400">
+                    ZCode session expired — re-login to enable claim and resets.
+                  </p>
+                )}
+                {glmZcode?.claim?.lastError && !glmZcode?.claim?.available && (
+                  <p className="mt-2 px-1 text-[10px] leading-relaxed text-text-muted">
+                    {glmZcode.claim.lastError}
+                  </p>
                 )}
                 {quota?.message && !error && !isLoading && (
                   <p className="mt-2 px-1 text-[10px] leading-relaxed text-text-muted">
@@ -1547,17 +1724,44 @@ export default function ProviderLimits() {
         onConfirm={async () => {
           const connection = resetConfirmState?.connection;
           if (!connection) return;
-          await handleResetCodexLimit(connection.id, connection.provider);
+          if (resetConfirmState?.glm) {
+            await handleGlmReset(connection.id, resetConfirmState.resetType);
+          } else {
+            await handleResetCodexLimit(connection.id, connection.provider);
+          }
           setResetConfirmState(null);
         }}
-        title={resetConfirmState?.connection?.provider === "claude" ? "Reset Claude limits?" : "Reset Codex limit?"}
-        message={resetConfirmState?.connection?.provider === "claude"
+        title={resetConfirmState?.glm
+          ? (resetConfirmState.resetType === "FIVE_HOUR" ? "Reset GLM 5-hour quota?" : "Reset GLM weekly quota?")
+          : resetConfirmState?.connection?.provider === "claude" ? "Reset Claude limits?" : "Reset Codex limit?"}
+        message={resetConfirmState?.glm
+          ? `Consumes 1 reset opportunity for ${getConnectionLabel(resetConfirmState.connection) || "this account"} (expires ${formatCreditDate(quotaData[resetConfirmState.connection.id]?.raw?.zcode?.resets?.[resetConfirmState.resetType === "FIVE_HOUR" ? "fiveHour" : "week"]?.soonestExpireAt)}). This cannot be undone. Resets left: ${resetConfirmState.resetCreditCount ?? 0}.`
+          : resetConfirmState?.connection?.provider === "claude"
           ? `Refills your ${formatClaudeResetClears(quotaData[resetConfirmState.connection.id]?.raw?.resetCredits?.clears)} now for ${getConnectionLabel(resetConfirmState.connection) || "this account"} · your weekly reset day stays ${formatCreditDate(quotaData[resetConfirmState.connection.id]?.raw?.resetCredits?.weeklyResetsAt)}. This cannot be undone. Resets left: ${resetConfirmState.resetCreditCount ?? 0}.`
           : `Use 1 Codex reset credit for ${getConnectionLabel(resetConfirmState?.connection || {}) || "this account"}. This cannot be undone. Remaining credits: ${resetConfirmState?.resetCreditCount ?? 0}.`}
         confirmText="Reset limit"
         cancelText="Cancel"
         variant="danger"
         loading={Boolean(resettingLimitId)}
+      />
+
+      <ConfirmModal
+        isOpen={Boolean(claimConfirmState)}
+        onClose={() => {
+          if (!claimingId) setClaimConfirmState(null);
+        }}
+        onConfirm={async () => {
+          const connection = claimConfirmState?.connection;
+          if (!connection) return;
+          await handleGlmClaim(connection.id, claimConfirmState.planId);
+          setClaimConfirmState(null);
+        }}
+        title="Claim weekend plan?"
+        message={`Claims ${claimConfirmState?.planName || "the weekend plan"} for ${getConnectionLabel(claimConfirmState?.connection || {}) || "this account"}. Free grant from the Z.ai Coding Plan.`}
+        confirmText="Claim"
+        cancelText="Cancel"
+        variant="primary"
+        loading={Boolean(claimingId)}
       />
 
       {resetCreditsState && (
