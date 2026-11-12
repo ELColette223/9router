@@ -1,5 +1,6 @@
 /**
- * ZCode billing API client (GLM Zcode coding plan): claim preview, claim, plan balance.
+ * ZCode billing API client (GLM Zcode coding plan): claim preview, claim, plan balance,
+ * coding-plan reset (status/use/opportunity).
  * Envelope + header contracts extracted from the official ZCode client.
  */
 
@@ -227,4 +228,103 @@ export async function fetchZcodePlanBalance({ apiKey, proxyOptions = null }) {
   });
 
   return { serverTime: data?.server_time ?? null, plans, balances };
+}
+
+export const ZCODE_RESET_TYPES = ["FIVE_HOUR", "WEEK"];
+
+function zcodeResetHeaders(zcodeJwt, businessToken) {
+  return {
+    Authorization: `Bearer ${zcodeJwt}`,
+    "X-Bigmodel-Authorization": businessToken,
+    "Bigmodel-Target-Type": "PERSONAL",
+  };
+}
+
+/**
+ * GET coding-plan/reset/status — available resets + latest use histories.
+ * expireAt/usedAt pass through as epoch ms numbers; null histories → null.
+ */
+export async function fetchZcodeResetStatus({ zcodeJwt, businessToken, proxyOptions = null }) {
+  const { json, status } = await zcodeRequest(
+    `${ZCODE_ORIGIN}/api/v1/coding-plan/reset/status`,
+    { headers: zcodeResetHeaders(zcodeJwt, businessToken) },
+    proxyOptions,
+  );
+  const { data } = unwrapZcodeEnvelope(json, status);
+
+  const mapResets = (resets) =>
+    (Array.isArray(resets) ? resets : []).map((reset) => ({ expireAt: reset?.expire_at ?? null }));
+
+  return {
+    fiveHour: mapResets(data?.available_five_hour_resets),
+    week: mapResets(data?.available_week_resets),
+    latestFiveHourUsedAt: data?.latest_five_hour_reset_history?.used_at ?? null,
+    latestWeekUsedAt: data?.latest_week_reset_history?.used_at ?? null,
+    hasUnreadHistory: data?.has_unread_history ?? false,
+  };
+}
+
+/**
+ * POST coding-plan/reset/use — consume one reset opportunity (irreversible).
+ * resetType/idempotencyKey are validated BEFORE any network call; success
+ * requires code === 0 AND data.used === true, anything else throws.
+ */
+export async function useZcodeReset({ zcodeJwt, businessToken, resetType, idempotencyKey, proxyOptions = null }) {
+  if (!ZCODE_RESET_TYPES.includes(resetType)) {
+    throw new ZcodeApiError(`Invalid ZCode reset type: ${resetType}`, { kind: "business" });
+  }
+  if (typeof idempotencyKey !== "string" || idempotencyKey.length < 1 || idempotencyKey.length > 64) {
+    throw new ZcodeApiError("ZCode idempotency key must be 1-64 characters", { kind: "business" });
+  }
+
+  const { json, status } = await zcodeRequest(
+    `${ZCODE_ORIGIN}/api/v1/coding-plan/reset/use`,
+    {
+      method: "POST",
+      headers: { ...zcodeResetHeaders(zcodeJwt, businessToken), "Content-Type": "application/json" },
+      body: JSON.stringify({ idempotency_key: idempotencyKey, reset_type: resetType }),
+    },
+    proxyOptions,
+  );
+  const { code, data } = unwrapZcodeEnvelope(json, status);
+
+  if (code !== 0 || data?.used !== true) {
+    throw new ZcodeApiError("ZCode reset use was not confirmed by the server", {
+      kind: "business",
+      code,
+      status,
+    });
+  }
+  return { used: true };
+}
+
+/**
+ * POST coding-plan/reset/opportunity — request reset grants (one call covers
+ * both reset types; the server caps grants, repeated calls do not stack).
+ * Code 3301 is the server cooldown boundary → { granted:false, nextTryAt };
+ * HTTP 429 without a 3301 envelope → ZcodeApiError kind "throttled".
+ */
+export async function requestZcodeResetOpportunity({ zcodeJwt, businessToken, idempotencyKey, proxyOptions = null }) {
+  try {
+    const { json, status } = await zcodeRequest(
+      `${ZCODE_ORIGIN}/api/v1/coding-plan/reset/opportunity`,
+      {
+        method: "POST",
+        headers: { ...zcodeResetHeaders(zcodeJwt, businessToken), "Content-Type": "application/json" },
+        body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      },
+      proxyOptions,
+    );
+    const { code, data } = unwrapZcodeEnvelope(json, status, { acceptedCodes: [3301] });
+
+    if (code === 3301) {
+      return { granted: false, nextTryAt: data?.next_try_at ?? null };
+    }
+    return { granted: true, nextTryAt: null };
+  } catch (error) {
+    if (error instanceof ZcodeApiError && error.status === 429) {
+      throw new ZcodeApiError(error.message, { kind: "throttled", code: error.code, status: error.status });
+    }
+    throw error;
+  }
 }

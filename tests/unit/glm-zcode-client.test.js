@@ -7,11 +7,15 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
 import { proxyAwareFetch } from "../../open-sse/utils/proxyFetch.js";
 import {
   ZCODE_APP_VERSION,
+  ZCODE_RESET_TYPES,
   ZcodeApiError,
   unwrapZcodeEnvelope,
   fetchZcodeClaimPreview,
   claimZcodePlan,
   fetchZcodePlanBalance,
+  fetchZcodeResetStatus,
+  useZcodeReset,
+  requestZcodeResetOpportunity,
 } from "../../open-sse/services/usage/glmZcode.js";
 
 function jsonResponse(body, status = 200) {
@@ -321,5 +325,200 @@ describe("fetchZcodePlanBalance", () => {
     expect(result.plans).toEqual([]);
     expect(result.balances).toEqual([]);
     expect(result.serverTime).toBeNull();
+  });
+});
+
+describe("fetchZcodeResetStatus", () => {
+  it("maps available resets and histories", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(
+      jsonResponse({
+        code: 0,
+        data: {
+          available_five_hour_resets: [{ expire_at: 1700000000000 }],
+          available_week_resets: [],
+          latest_five_hour_reset_history: { used_at: 1699999999000 },
+          latest_week_reset_history: null,
+          has_unread_history: false,
+        },
+      })
+    );
+
+    const result = await fetchZcodeResetStatus({ zcodeJwt: "jwt-x", businessToken: "biz-x" });
+
+    expect(result.fiveHour[0].expireAt).toBe(1700000000000);
+    expect(result.week).toEqual([]);
+    expect(result.latestFiveHourUsedAt).toBe(1699999999000);
+    expect(result.latestWeekUsedAt).toBeNull();
+    expect(result.hasUnreadHistory).toBe(false);
+
+    const [url, options] = proxyAwareFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/coding-plan/reset/status");
+    expect(options.method).toBe("GET");
+    expect(options.headers).toMatchObject({ Authorization: "Bearer jwt-x" });
+  });
+
+  it("sends dual-auth headers", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 0, data: {} }));
+
+    const proxyOptions = { connectionProxyEnabled: true, connectionProxyUrl: "http://127.0.0.1:8888" };
+    await fetchZcodeResetStatus({ zcodeJwt: "jwt-x", businessToken: "biz-x", proxyOptions });
+
+    const [, options, passedProxyOptions] = proxyAwareFetch.mock.calls[0];
+    expect(options.headers).toMatchObject({
+      Authorization: "Bearer jwt-x",
+      "X-Bigmodel-Authorization": "biz-x",
+      "Bigmodel-Target-Type": "PERSONAL",
+    });
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(passedProxyOptions).toBe(proxyOptions);
+  });
+});
+
+describe("useZcodeReset", () => {
+  it("posts idempotency key and reset type", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 0, data: { used: true } }));
+
+    const result = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "FIVE_HOUR",
+      idempotencyKey: "key-1",
+    });
+
+    expect(ZCODE_RESET_TYPES).toEqual(["FIVE_HOUR", "WEEK"]);
+    expect(result).toEqual({ used: true });
+
+    const [url, options] = proxyAwareFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/coding-plan/reset/use");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({ idempotency_key: "key-1", reset_type: "FIVE_HOUR" });
+    expect(options.headers).toMatchObject({
+      Authorization: "Bearer jwt-x",
+      "X-Bigmodel-Authorization": "biz-x",
+      "Bigmodel-Target-Type": "PERSONAL",
+      "Content-Type": "application/json",
+    });
+  });
+
+  it("rejects invalid reset type", async () => {
+    const error = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "DAY",
+      idempotencyKey: "key-1",
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("business");
+    expect(proxyAwareFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized idempotency key", async () => {
+    const error = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "FIVE_HOUR",
+      idempotencyKey: "k".repeat(65),
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("business");
+    expect(proxyAwareFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty idempotency key", async () => {
+    const error = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "FIVE_HOUR",
+      idempotencyKey: "",
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("business");
+    expect(proxyAwareFetch).not.toHaveBeenCalled();
+  });
+
+  it("business error throws", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 2007 }, 400));
+
+    const error = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "WEEK",
+      idempotencyKey: "key-1",
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("business");
+    expect(error.code).toBe(2007);
+    expect(error.status).toBe(400);
+  });
+});
+
+describe("requestZcodeResetOpportunity", () => {
+  it("granted", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 0, data: { granted: true } }));
+
+    const result = await requestZcodeResetOpportunity({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      idempotencyKey: "key-1",
+    });
+
+    expect(result).toEqual({ granted: true, nextTryAt: null });
+
+    const [url, options] = proxyAwareFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/coding-plan/reset/opportunity");
+    expect(options.method).toBe("POST");
+    expect(JSON.parse(options.body)).toEqual({ idempotency_key: "key-1" });
+    expect(options.headers).toMatchObject({
+      Authorization: "Bearer jwt-x",
+      "X-Bigmodel-Authorization": "biz-x",
+      "Bigmodel-Target-Type": "PERSONAL",
+      "Content-Type": "application/json",
+    });
+  });
+
+  it("denied with next_try_at", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(
+      jsonResponse({ code: 3301, data: { granted: false, next_try_at: 1700000600000 } })
+    );
+
+    const result = await requestZcodeResetOpportunity({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      idempotencyKey: "key-1",
+    });
+
+    expect(result).toEqual({ granted: false, nextTryAt: 1700000600000 });
+  });
+
+  it("3301 envelope on HTTP 429 returns denied, not throttled", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(
+      jsonResponse({ code: 3301, data: { granted: false, next_try_at: 1700000600000 } }, 429)
+    );
+
+    const result = await requestZcodeResetOpportunity({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      idempotencyKey: "key-1",
+    });
+
+    expect(result).toEqual({ granted: false, nextTryAt: 1700000600000 });
+  });
+
+  it("HTTP 429 without envelope throws throttled", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({}, 429));
+
+    const error = await requestZcodeResetOpportunity({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      idempotencyKey: "key-1",
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("throttled");
+    expect(error.status).toBe(429);
   });
 });
