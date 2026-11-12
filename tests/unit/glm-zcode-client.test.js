@@ -454,6 +454,47 @@ describe("useZcodeReset", () => {
     expect(error.code).toBe(2007);
     expect(error.status).toBe(400);
   });
+
+  it("code 0 without used flag is success", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 0, data: {} }));
+
+    const result = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "FIVE_HOUR",
+      idempotencyKey: "key-1",
+    });
+
+    expect(result).toEqual({ used: true });
+  });
+
+  it("code 0 with used:false is still success", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 0, data: { used: false } }));
+
+    const result = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "FIVE_HOUR",
+      idempotencyKey: "key-1",
+    });
+
+    expect(result).toEqual({ used: true });
+  });
+
+  it("2xx without envelope throws transport", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({}, 200));
+
+    const error = await useZcodeReset({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      resetType: "FIVE_HOUR",
+      idempotencyKey: "key-1",
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("transport");
+    expect(error.status).toBe(200);
+  });
 });
 
 describe("requestZcodeResetOpportunity", () => {
@@ -520,5 +561,19 @@ describe("requestZcodeResetOpportunity", () => {
     expect(error).toBeInstanceOf(ZcodeApiError);
     expect(error.kind).toBe("throttled");
     expect(error.status).toBe(429);
+  });
+
+  it("2xx without envelope throws instead of granting", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({}, 200));
+
+    const error = await requestZcodeResetOpportunity({
+      zcodeJwt: "jwt-x",
+      businessToken: "biz-x",
+      idempotencyKey: "key-1",
+    }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("transport");
+    expect(error.status).toBe(200);
   });
 });

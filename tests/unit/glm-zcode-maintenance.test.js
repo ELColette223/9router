@@ -133,6 +133,8 @@ describe("glm zcode maintenance", () => {
       remainingPercentage: (299999000 / 300000000) * 100,
       resetAt: new Date(1700086400 * 1000).toISOString(),
       unlimited: false,
+      // Weekend grants are one-time: resetAt is a hard expiry, not a refresh.
+      recurring: false,
     });
     expect(result.zcode.resets.fiveHour).toEqual({ count: 1, soonestExpireAt: 1700000000000 });
     expect(result.zcode.resets.week).toEqual({ count: 0, soonestExpireAt: null });

@@ -263,6 +263,9 @@ function buildEnrichment({ balance, status, claimState, sessionExpired, autoClai
       remainingPercentage: total > 0 ? (remaining / total) * 100 : 0,
       resetAt: parseResetTime(bucket?.expiresAt),
       unlimited: false,
+      // Weekend grants are one-time: resetAt is a hard expiry, so the UI
+      // words it as "expires in" instead of a recurring reset countdown.
+      recurring: false,
     };
   }
 

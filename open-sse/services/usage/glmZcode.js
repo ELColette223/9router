@@ -266,8 +266,10 @@ export async function fetchZcodeResetStatus({ zcodeJwt, businessToken, proxyOpti
 
 /**
  * POST coding-plan/reset/use — consume one reset opportunity (irreversible).
- * resetType/idempotencyKey are validated BEFORE any network call; success
- * requires code === 0 AND data.used === true, anything else throws.
+ * resetType/idempotencyKey are validated BEFORE any network call. Envelope
+ * rule: code === 0 is authoritative success (data.used is not required).
+ * A 2xx without a parseable envelope throws kind "transport" — the outcome
+ * is unknown, so the caller keeps its write-ahead key and reconciles later.
  */
 export async function useZcodeReset({ zcodeJwt, businessToken, resetType, idempotencyKey, proxyOptions = null }) {
   if (!ZCODE_RESET_TYPES.includes(resetType)) {
@@ -286,23 +288,28 @@ export async function useZcodeReset({ zcodeJwt, businessToken, resetType, idempo
     },
     proxyOptions,
   );
-  const { code, data } = unwrapZcodeEnvelope(json, status);
+  const { code } = unwrapZcodeEnvelope(json, status);
 
-  if (code !== 0 || data?.used !== true) {
-    throw new ZcodeApiError("ZCode reset use was not confirmed by the server", {
-      kind: "business",
-      code,
+  if (code === null) {
+    // 2xx without an envelope: the server MAY have consumed the reset.
+    // Transport (not business) keeps the write-ahead key pending downstream.
+    throw new ZcodeApiError("ZCode reset use returned no envelope; outcome unknown", {
+      kind: "transport",
       status,
     });
   }
+  // unwrapZcodeEnvelope already threw for non-zero business codes; code === 0
+  // is success per the envelope rule regardless of data.used.
   return { used: true };
 }
 
 /**
  * POST coding-plan/reset/opportunity — request reset grants (one call covers
  * both reset types; the server caps grants, repeated calls do not stack).
- * Code 3301 is the server cooldown boundary → { granted:false, nextTryAt };
- * HTTP 429 without a 3301 envelope → ZcodeApiError kind "throttled".
+ * Code 0 → granted; code 3301 is the server cooldown boundary →
+ * { granted:false, nextTryAt }. A 2xx without a parseable envelope throws
+ * kind "transport" (never grants on an unknown outcome); HTTP 429 without
+ * a 3301 envelope → ZcodeApiError kind "throttled".
  */
 export async function requestZcodeResetOpportunity({ zcodeJwt, businessToken, idempotencyKey, proxyOptions = null }) {
   try {
@@ -319,6 +326,12 @@ export async function requestZcodeResetOpportunity({ zcodeJwt, businessToken, id
 
     if (code === 3301) {
       return { granted: false, nextTryAt: data?.next_try_at ?? null };
+    }
+    if (code === null) {
+      throw new ZcodeApiError("ZCode reset opportunity returned no envelope; grants unknown", {
+        kind: "transport",
+        status,
+      });
     }
     return { granted: true, nextTryAt: null };
   } catch (error) {

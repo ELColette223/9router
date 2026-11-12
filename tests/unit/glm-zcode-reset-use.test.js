@@ -147,6 +147,30 @@ describe("glm zcode protected reset use", () => {
     expect(db.connection.providerSpecificData.zcodeResetPending).toBeUndefined();
   });
 
+  it("transport-classified unconfirmed use keeps pending", async () => {
+    // 2xx without a parseable envelope: the server MAY have consumed the reset.
+    // The client must classify this as transport so the write-ahead key survives.
+    useZcodeReset.mockRejectedValueOnce(
+      new ZcodeApiError("ZCode reset use returned no envelope", { kind: "transport", status: 200 }),
+    );
+
+    const result = await useGlmResetProtected(db.connection, "FIVE_HOUR");
+
+    expect(result).toEqual({ ok: false, uncertain: true, message: expect.stringMatching(/retry/i) });
+    const pending = db.connection.providerSpecificData.zcodeResetPending.FIVE_HOUR;
+    expect(pending).toBeTruthy();
+    expect(pending.key).toBe(useZcodeReset.mock.calls[0][0].idempotencyKey);
+
+    // Retry reconciles via /status history instead of spending a fresh key.
+    fetchZcodeResetStatus.mockResolvedValue({ ...emptyStatus(), latestFiveHourUsedAt: NOW + 1 });
+    const fresh = await getProviderConnectionById("c1");
+    const retry = await useGlmResetProtected(fresh, "FIVE_HOUR");
+
+    expect(retry).toEqual({ ok: true, alreadyReset: true });
+    expect(useZcodeReset).toHaveBeenCalledTimes(1); // never re-consumed
+    expect(db.connection.providerSpecificData.zcodeResetPending).toBeUndefined();
+  });
+
   it("reconciles consumed attempt via history", async () => {
     db.connection = makeConnection({
       zcodeResetPending: {
