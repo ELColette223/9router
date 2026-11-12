@@ -146,12 +146,12 @@ const OAUTH_PROVIDERS = {
   iflow: { id: "iflow", alias: "if", name: "iFlow AI" },
   qwen: { id: "qwen", alias: "qw", name: "Qwen Code" },
   kiro: { id: "kiro", alias: "kr", name: "Kiro AI" },
-  glm: { id: "glm", alias: "glm", name: "Zai GLM Coding" },
+  glm: { id: "glm", alias: "glm", name: "GLM Zcode" },
 };
 
 const APIKEY_PROVIDERS = {
   openrouter: { id: "openrouter", name: "OpenRouter" },
-  glm: { id: "glm", name: "Zai GLM Coding" },
+  glm: { id: "glm", name: "GLM Zcode" },
   minimax: { id: "minimax", name: "Minimax Coding" },
   kimi: { id: "kimi", name: "Kimi" },
   openai: { id: "openai", name: "OpenAI" },

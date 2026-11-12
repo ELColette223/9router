@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { GLM_OAUTH_CONFIG } from "../constants/oauth.js";
 
-// Zai GLM Coding OAuth — CLI polling flow (mirrors the official
+// GLM Zcode OAuth — CLI polling flow (mirrors the official
 // ZCode CLI, apps/zcode-cli packages/adapters/src/auth/cli-oauth.ts +
 // coding-plan-api-key.ts). No PKCE and no local callback server:
 //
