@@ -270,4 +270,53 @@ describe("glm zcode protected reset use", () => {
     expect(useZcodeReset).not.toHaveBeenCalled();
     expect(fetchZcodeResetStatus).not.toHaveBeenCalled();
   });
+
+  // Fake timers do not affect promise microtasks; flush enough ticks for a
+  // call to traverse the write-ahead DB awaits and reach /use.
+  const flushMicrotasks = async () => {
+    for (let i = 0; i < 20; i += 1) await Promise.resolve();
+  };
+
+  it("concurrent same-type calls are rejected while one is in flight", async () => {
+    let resolveUse;
+    useZcodeReset.mockImplementation(() => new Promise((resolve) => { resolveUse = resolve; }));
+
+    const callA = useGlmResetProtected(db.connection, "FIVE_HOUR", PROXY);
+    await flushMicrotasks(); // A passes the write-ahead and reaches /use
+    expect(useZcodeReset).toHaveBeenCalledTimes(1);
+
+    const callB = useGlmResetProtected(db.connection, "FIVE_HOUR", PROXY);
+    await flushMicrotasks();
+    // B is rejected by the guard before touching /use or reconciliation.
+    expect(useZcodeReset).toHaveBeenCalledTimes(1);
+    expect(fetchZcodeResetStatus).not.toHaveBeenCalled();
+    expect(await callB).toEqual({
+      ok: false,
+      message: "A reset is already in progress for this account. Try again in a moment.",
+    });
+
+    resolveUse({ used: true });
+    expect(await callA).toEqual({ ok: true });
+
+    // Guard released: a subsequent call proceeds normally.
+    useZcodeReset.mockResolvedValue({ used: true });
+    expect(await useGlmResetProtected(db.connection, "FIVE_HOUR", PROXY)).toEqual({ ok: true });
+    expect(useZcodeReset).toHaveBeenCalledTimes(2);
+  });
+
+  it("a FIVE_HOUR reset in flight does not block WEEK", async () => {
+    let resolveFiveHour;
+    useZcodeReset
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFiveHour = resolve; }))
+      .mockResolvedValueOnce({ used: true });
+
+    const fiveHour = useGlmResetProtected(db.connection, "FIVE_HOUR", PROXY);
+    await flushMicrotasks();
+
+    // Different type = different opportunity: it must proceed, not be blocked.
+    expect(await useGlmResetProtected(db.connection, "WEEK", PROXY)).toEqual({ ok: true });
+
+    resolveFiveHour({ used: true });
+    expect(await fiveHour).toEqual({ ok: true });
+  });
 });

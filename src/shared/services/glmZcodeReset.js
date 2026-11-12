@@ -14,6 +14,12 @@ import { GLM_ZCODE_CONFIG } from "@/shared/constants/config";
 
 const SESSION_EXPIRED_MESSAGE = "ZCode session expired — re-login to the GLM connection to refresh your ZCode credentials.";
 const UNCONFIRMED_MESSAGE = "ZCode reset use was not confirmed — retry to reconcile the pending attempt.";
+const IN_PROGRESS_MESSAGE = "A reset is already in progress for this account. Try again in a moment.";
+
+// Survive Next.js hot reload (same singleton pattern as glmZcodeMaintenance).
+// In-flight guard: concurrent same connection+type calls must not race past the
+// write-ahead and consume two opportunities. Released in finally on every path.
+const inFlight = (globalThis.__glmZcodeResetUse ??= new Map()); // `${id}:${resetType}` → true
 
 function isAuthError(error) {
   return error instanceof ZcodeApiError && error.kind === "auth";
@@ -57,6 +63,7 @@ async function clearPendingEntry(id, resetType, { bumpOpportunity = false } = {}
 
 /**
  * Consume one ZCode reset opportunity with double-consumption protection.
+ * Concurrent same connection+type calls are rejected while one is in flight.
  * → { ok:true, alreadyReset?:true } | { ok:false, uncertain?:true, message, status? }
  * Persisted state: providerSpecificData.zcodeResetPending[resetType] = { key, startedAt }.
  */
@@ -65,60 +72,70 @@ export async function useGlmResetProtected(connection, resetType, proxyOptions =
     return { ok: false, message: `Invalid ZCode reset type: ${resetType}` };
   }
 
-  const id = connection.id;
-  const psd = connection.providerSpecificData || {};
-  const auth = {
-    zcodeJwt: psd.zcodeJwtToken,
-    businessToken: psd.zaiBusinessToken ?? null,
-    proxyOptions,
-  };
+  const guardKey = `${connection.id}:${resetType}`;
+  if (inFlight.has(guardKey)) {
+    // Nothing was consumed by this call; a later retry is safe (not uncertain).
+    return { ok: false, message: IN_PROGRESS_MESSAGE };
+  }
+  inFlight.set(guardKey, true); // held across write-ahead, /use, and reconciliation
+  try {
+    const id = connection.id;
+    const psd = connection.providerSpecificData || {};
+    const auth = {
+      zcodeJwt: psd.zcodeJwtToken,
+      businessToken: psd.zaiBusinessToken ?? null,
+      proxyOptions,
+    };
 
-  let pending = psd.zcodeResetPending?.[resetType] ?? null;
-  let key;
+    let pending = psd.zcodeResetPending?.[resetType] ?? null;
+    let key;
 
-  if (pending) {
-    // A prior attempt may have been consumed server-side despite a timeout.
-    // Reconcile via history before spending another opportunity.
-    let status;
+    if (pending) {
+      // A prior attempt may have been consumed server-side despite a timeout.
+      // Reconcile via history before spending another opportunity.
+      let status;
+      try {
+        status = await fetchZcodeResetStatus(auth);
+      } catch (error) {
+        if (isAuthError(error)) {
+          await clearPendingEntry(id, resetType);
+          return { ok: false, status: 401, message: SESSION_EXPIRED_MESSAGE };
+        }
+        // Throttled/transport/unexpected: cannot reconcile → do NOT consume.
+        // Keep pending; a later retry reconciles again.
+        return { ok: false, uncertain: true, message: UNCONFIRMED_MESSAGE };
+      }
+
+      const latestUsedAt = resetType === "FIVE_HOUR" ? status.latestFiveHourUsedAt : status.latestWeekUsedAt;
+      if (Number.isFinite(latestUsedAt) && latestUsedAt >= pending.startedAt) {
+        await clearPendingEntry(id, resetType);
+        return { ok: true, alreadyReset: true };
+      }
+      key = pending.key; // reuse — server dedupes by idempotency key
+    } else {
+      key = randomUUID();
+      pending = { key, startedAt: Date.now() };
+      await persistPendingEntry(id, resetType, pending); // write-ahead BEFORE /use
+    }
+
     try {
-      status = await fetchZcodeResetStatus(auth);
+      await useZcodeReset({ ...auth, resetType, idempotencyKey: key });
     } catch (error) {
       if (isAuthError(error)) {
         await clearPendingEntry(id, resetType);
         return { ok: false, status: 401, message: SESSION_EXPIRED_MESSAGE };
       }
-      // Throttled/transport/unexpected: cannot reconcile → do NOT consume.
-      // Keep pending; a later retry reconciles again.
+      if (error instanceof ZcodeApiError && error.kind === "business") {
+        await clearPendingEntry(id, resetType);
+        return { ok: false, message: error.message };
+      }
+      // Throttled/transport/unexpected: keep pending; a retry reconciles or reuses the key.
       return { ok: false, uncertain: true, message: UNCONFIRMED_MESSAGE };
     }
 
-    const latestUsedAt = resetType === "FIVE_HOUR" ? status.latestFiveHourUsedAt : status.latestWeekUsedAt;
-    if (Number.isFinite(latestUsedAt) && latestUsedAt >= pending.startedAt) {
-      await clearPendingEntry(id, resetType);
-      return { ok: true, alreadyReset: true };
-    }
-    key = pending.key; // reuse — server dedupes by idempotency key
-  } else {
-    key = randomUUID();
-    pending = { key, startedAt: Date.now() };
-    await persistPendingEntry(id, resetType, pending); // write-ahead BEFORE /use
+    await clearPendingEntry(id, resetType, { bumpOpportunity: true });
+    return { ok: true };
+  } finally {
+    inFlight.delete(guardKey);
   }
-
-  try {
-    await useZcodeReset({ ...auth, resetType, idempotencyKey: key });
-  } catch (error) {
-    if (isAuthError(error)) {
-      await clearPendingEntry(id, resetType);
-      return { ok: false, status: 401, message: SESSION_EXPIRED_MESSAGE };
-    }
-    if (error instanceof ZcodeApiError && error.kind === "business") {
-      await clearPendingEntry(id, resetType);
-      return { ok: false, message: error.message };
-    }
-    // Throttled/transport/unexpected: keep pending; a retry reconciles or reuses the key.
-    return { ok: false, uncertain: true, message: UNCONFIRMED_MESSAGE };
-  }
-
-  await clearPendingEntry(id, resetType, { bumpOpportunity: true });
-  return { ok: true };
 }
