@@ -372,3 +372,316 @@ describe("glm zcode maintenance", () => {
     expect(psd.zcodeJwtToken).toBe("jwt");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Route-level tests: glm-claim POST + usage GET maintenance hook.
+// vi.mock calls are hoisted to the top of the file regardless of position.
+// The maintenance mock keeps the REAL implementation as the vi.fn default so
+// the unit tests above still exercise the genuine module; route tests override
+// runGlmZcodeMaintenance per case. isGlmZcodeEligible stays real throughout.
+// ---------------------------------------------------------------------------
+
+vi.mock("open-sse/index.js", () => ({}));
+
+vi.mock("@/lib/network/connectionProxy", () => ({
+  resolveConnectionProxyConfig: vi.fn(async () => ({
+    connectionProxyEnabled: false,
+    connectionProxyUrl: "",
+    connectionNoProxy: "",
+    vercelRelayUrl: "",
+  })),
+}));
+
+vi.mock("open-sse/services/usage.js", () => ({
+  getUsageForProvider: vi.fn(),
+}));
+
+vi.mock("open-sse/executors/index.js", () => ({
+  getExecutor: vi.fn(() => ({ needsRefresh: () => false })),
+}));
+
+vi.mock("open-sse/services/tokenRefresh.js", () => ({
+  isUnrecoverableRefreshError: vi.fn(() => false),
+}));
+
+vi.mock("@/shared/services/glmZcodeMaintenance.js", async () => {
+  const actual = await vi.importActual("@/shared/services/glmZcodeMaintenance.js");
+  return {
+    ...actual,
+    // Delegate at CALL time: this factory runs once per file, but the unit
+    // tests above rely on vi.resetModules() re-evaluating the real module
+    // (fresh globalThis enrichment cache per test). A factory-captured
+    // delegate would pin the first module instance and leak its cache.
+    runGlmZcodeMaintenance: vi.fn(async (...args) => {
+      const fresh = await vi.importActual("@/shared/services/glmZcodeMaintenance.js");
+      return fresh.runGlmZcodeMaintenance(...args);
+    }),
+  };
+});
+
+// Keep GET real (it carries the hook under test); stub only the exported
+// refreshAndUpdateCredentials consumed by sibling routes (glm-claim). GET is
+// wrapped with call-time importActual for the same fresh-module reason as
+// above; its internal refresh call still runs for real, but getExecutor is
+// mocked to needsRefresh:false so it never touches the network.
+vi.mock("@/app/api/usage/[connectionId]/route.js", async () => {
+  const actual = await vi.importActual("@/app/api/usage/[connectionId]/route.js");
+  return {
+    ...actual,
+    GET: vi.fn(async (...args) => {
+      const fresh = await vi.importActual("@/app/api/usage/[connectionId]/route.js");
+      return fresh.GET(...args);
+    }),
+    refreshAndUpdateCredentials: vi.fn(async (connection) => ({ connection, refreshed: false })),
+  };
+});
+
+describe("glm-claim route", () => {
+  let db;
+  let POST;
+  let ZcodeApiError;
+  let fetchZcodeClaimPreview;
+  let claimZcodePlan;
+  let getProviderConnectionById;
+  let updateProviderConnection;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    ({ ZcodeApiError, fetchZcodeClaimPreview, claimZcodePlan } = await import("open-sse/services/usage/glmZcode.js"));
+    ({ getProviderConnectionById, updateProviderConnection } = await import("@/lib/localDb"));
+    ({ POST } = await import("@/app/api/usage/[connectionId]/glm-claim/route.js"));
+
+    db = { connection: makeConnection() };
+    getProviderConnectionById.mockImplementation(async (id) =>
+      id === db.connection.id ? structuredClone(db.connection) : null,
+    );
+    updateProviderConnection.mockImplementation(async (id, data) => {
+      db.connection = { ...db.connection, ...data };
+      return db.connection;
+    });
+
+    fetchZcodeClaimPreview.mockResolvedValue({ serverTime: null, plans: [] });
+    claimZcodePlan.mockResolvedValue({ success: true, code: 0, message: "", plan: null });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const post = (body = {}) =>
+    POST(
+      new Request("http://localhost/api/usage/c1/glm-claim", { method: "POST", body: JSON.stringify(body) }),
+      { params: Promise.resolve({ connectionId: "c1" }) },
+    );
+
+  it("picks weekend plan when planId omitted", async () => {
+    fetchZcodeClaimPreview.mockResolvedValue({
+      serverTime: null,
+      plans: [
+        { name: "Pro Upgrade", planId: "p1" },
+        { name: "ZCode Weekend Build", planId: "w1" },
+      ],
+    });
+    claimZcodePlan.mockResolvedValue({
+      success: true,
+      code: 0,
+      message: "",
+      plan: { planId: "w1", name: "ZCode Weekend Build", endsAt: 1763251200 },
+    });
+
+    const response = await post();
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).success).toBe(true);
+    expect(fetchZcodeClaimPreview).toHaveBeenCalledTimes(1);
+    expect(claimZcodePlan).toHaveBeenCalledTimes(1);
+    expect(claimZcodePlan.mock.calls[0][0]).toMatchObject({ zcodeJwt: "jwt", planId: "w1" });
+
+    const payload = updateProviderConnection.mock.calls.at(-1)[1];
+    expect(payload.providerSpecificData.zcodeNextClaimCheckAt).toBeGreaterThanOrEqual(NOW + 21600000);
+    const claimState = payload.providerSpecificData.zcodeClaimState;
+    expect(claimState.available).toBe(false);
+    expect(claimState.lastClaimedAt).toBe(new Date(NOW).toISOString());
+    expect(claimState.lastError).toBeNull();
+    expect(claimState.planName).toBe("ZCode Weekend Build");
+    expect(claimState.endsAt).toBe(1763251200);
+    // Full merged providerSpecificData: existing fields survive the write.
+    expect(payload.providerSpecificData.zcodeJwtToken).toBe("jwt");
+    expect(payload.providerSpecificData.zaiBusinessToken).toBe("biz");
+  });
+
+  it("refuses when no weekend plan", async () => {
+    fetchZcodeClaimPreview.mockResolvedValue({
+      serverTime: null,
+      plans: [{ name: "Pro Upgrade", planId: "p1" }],
+    });
+
+    const response = await post();
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ success: false, message: "No weekend plan available to claim" });
+    expect(claimZcodePlan).not.toHaveBeenCalled();
+    expect(updateProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it("passes explicit planId through", async () => {
+    const response = await post({ planId: "w1" });
+
+    expect(response.status).toBe(200);
+    expect((await response.json()).success).toBe(true);
+    expect(fetchZcodeClaimPreview).not.toHaveBeenCalled();
+    expect(claimZcodePlan).toHaveBeenCalledTimes(1);
+    expect(claimZcodePlan.mock.calls[0][0]).toMatchObject({ zcodeJwt: "jwt", planId: "w1" });
+  });
+
+  it("returns business failure as 200 with the server message", async () => {
+    claimZcodePlan.mockResolvedValue({ success: false, code: 1003, message: "already claimed", plan: null });
+
+    const response = await post({ planId: "w1" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: false, code: 1003, message: "already claimed", plan: null });
+    expect(updateProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it("maps auth errors to 401", async () => {
+    claimZcodePlan.mockRejectedValue(new ZcodeApiError("401", { kind: "auth", status: 401 }));
+
+    const response = await post({ planId: "w1" });
+
+    expect(response.status).toBe(401);
+    expect(updateProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it("404 for unknown connection", async () => {
+    getProviderConnectionById.mockResolvedValue(null);
+
+    const response = await post();
+
+    expect(response.status).toBe(404);
+    expect(claimZcodePlan).not.toHaveBeenCalled();
+  });
+
+  it("400 for non-eligible connections", async () => {
+    db.connection = makeConnection({}, { authType: "apikey" });
+
+    const response = await post();
+
+    expect(response.status).toBe(400);
+    expect(fetchZcodeClaimPreview).not.toHaveBeenCalled();
+    expect(claimZcodePlan).not.toHaveBeenCalled();
+  });
+});
+
+describe("usage GET zcode hook", () => {
+  let db;
+  let GET;
+  let getUsageForProvider;
+  let runGlmZcodeMaintenance;
+  let getProviderConnectionById;
+
+  const BASE_USAGE = { plan: "Lite", quotas: { "Session (5h)": { used: 25, total: 100 } } };
+  const ENRICHMENT = {
+    quotas: {
+      "Weekend · GLM-5.3-Flash": {
+        used: 1000,
+        total: 300000000,
+        remaining: 299999000,
+        remainingPercentage: (299999000 / 300000000) * 100,
+        resetAt: "2026-11-16T00:00:00.000Z",
+        unlimited: false,
+      },
+    },
+    zcode: {
+      resets: {
+        fiveHour: { count: 1, soonestExpireAt: NOW },
+        week: { count: 0, soonestExpireAt: null },
+      },
+      claim: {
+        available: false,
+        planId: null,
+        planName: null,
+        autoClaim: true,
+        lastError: null,
+        lastClaimedAt: null,
+        endsAt: null,
+      },
+      sessionExpired: false,
+    },
+  };
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    ({ getUsageForProvider } = await import("open-sse/services/usage.js"));
+    ({ getProviderConnectionById } = await import("@/lib/localDb"));
+    ({ runGlmZcodeMaintenance } = await import("@/shared/services/glmZcodeMaintenance.js"));
+    ({ GET } = await import("@/app/api/usage/[connectionId]/route.js"));
+
+    db = { connection: makeConnection() };
+    getProviderConnectionById.mockImplementation(async (id) =>
+      id === db.connection.id ? structuredClone(db.connection) : null,
+    );
+    getUsageForProvider.mockResolvedValue(structuredClone(BASE_USAGE));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const get = (url = "http://localhost/api/usage/c1") =>
+    GET(new Request(url), { params: Promise.resolve({ connectionId: "c1" }) });
+
+  it("merges enrichment without dropping monitor quotas", async () => {
+    runGlmZcodeMaintenance.mockResolvedValue(ENRICHMENT);
+
+    const response = await get();
+
+    expect(response.status).toBe(200);
+    const json = await response.json();
+    expect(json.plan).toBe("Lite");
+    expect(Object.keys(json.quotas).sort()).toEqual(["Session (5h)", "Weekend · GLM-5.3-Flash"]);
+    expect(json.quotas["Session (5h)"]).toEqual({ used: 25, total: 100 });
+    expect(json.quotas["Weekend · GLM-5.3-Flash"]).toEqual(ENRICHMENT.quotas["Weekend · GLM-5.3-Flash"]);
+    expect(json.zcode).toEqual(ENRICHMENT.zcode);
+    expect(runGlmZcodeMaintenance).toHaveBeenCalledTimes(1);
+    expect(runGlmZcodeMaintenance.mock.calls[0][1]).toMatchObject({ connectionProxyEnabled: false, strictProxy: false });
+    expect(runGlmZcodeMaintenance.mock.calls[0][2]).toEqual({ force: false });
+  });
+
+  it("leaves apikey connections untouched", async () => {
+    db.connection = makeConnection({}, { authType: "apikey" });
+
+    const response = await get();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(BASE_USAGE);
+    expect(runGlmZcodeMaintenance).not.toHaveBeenCalled();
+  });
+
+  it("still returns base usage when maintenance throws", async () => {
+    runGlmZcodeMaintenance.mockRejectedValue(new Error("boom"));
+
+    const response = await get();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(BASE_USAGE);
+  });
+
+  it("passes force flag through to maintenance", async () => {
+    runGlmZcodeMaintenance.mockResolvedValue(null);
+
+    const response = await get("http://localhost/api/usage/c1?force=1");
+
+    expect(response.status).toBe(200);
+    expect(runGlmZcodeMaintenance).toHaveBeenCalledTimes(1);
+    expect(runGlmZcodeMaintenance.mock.calls[0][2]).toEqual({ force: true });
+  });
+});

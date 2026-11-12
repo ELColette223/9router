@@ -7,6 +7,7 @@ import { isUnrecoverableRefreshError } from "open-sse/services/tokenRefresh.js";
 import { getExecutor } from "open-sse/executors/index.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
+import { isGlmZcodeEligible, runGlmZcodeMaintenance } from "@/shared/services/glmZcodeMaintenance";
 
 // Detect auth-expired messages returned by usage providers instead of throwing
 const AUTH_EXPIRED_PATTERNS = ["expired", "authentication", "unauthorized", "401", "re-authorize"];
@@ -191,6 +192,17 @@ export async function GET(request, { params }) {
         usage = await getUsageForProvider(connection, proxyOptions, { force });
       } catch (retryError) {
         console.warn(`[Usage] ${connection.provider}: force refresh failed: ${retryError.message}`);
+      }
+    }
+
+    // GLM Zcode: epoch-gated maintenance + weekend buckets on eligible connections.
+    // Fail-open: enrichment must never break the base quota response.
+    if (isGlmZcodeEligible(connection)) {
+      try {
+        const enrichment = await runGlmZcodeMaintenance(connection, proxyOptions, { force });
+        if (enrichment) usage = { ...usage, ...enrichment, quotas: { ...(usage.quotas || {}), ...(enrichment.quotas || {}) } };
+      } catch (error) {
+        console.warn(`[Usage] ${connection.provider}: Zcode maintenance failed: ${error.message}`);
       }
     }
 
