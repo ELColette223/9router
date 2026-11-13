@@ -3,7 +3,12 @@ import "open-sse/index.js";
 
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
-import { isGlmZcodeEligible } from "@/shared/services/glmZcodeMaintenance";
+import {
+  isGlmZcodeEligible,
+  sanitizeZcodeClaimMessage,
+  ZCODE_CLAIM_FAILED_MESSAGE,
+  ZCODE_SESSION_EXPIRED_MESSAGE,
+} from "@/shared/services/glmZcodeMaintenance";
 import { ZcodeApiError, fetchZcodeClaimPreview, claimZcodePlan } from "open-sse/services/usage/glmZcode.js";
 import { GLM_ZCODE_CONFIG } from "@/shared/constants/config";
 import { refreshAndUpdateCredentials } from "../route.js";
@@ -74,12 +79,15 @@ export async function POST(request, { params }) {
       });
     }
 
+    // Business failure copy is ZCode's server-translated user message; bound it.
+    if (!result.success) return Response.json({ ...result, message: sanitizeZcodeClaimMessage(result.message) });
     return Response.json(result);
   } catch (error) {
+    // Raw error text stays in server logs; the browser only gets static copy.
+    console.warn(`[GLM Claim] ${error?.message}`);
     if (error instanceof ZcodeApiError && error.kind === "auth") {
-      return Response.json({ error: error.message }, { status: 401 });
+      return Response.json({ error: ZCODE_SESSION_EXPIRED_MESSAGE }, { status: 401 });
     }
-    console.warn(`[GLM Claim] ${error.message}`);
-    return Response.json({ error: error.message }, { status: 500 });
+    return Response.json({ error: ZCODE_CLAIM_FAILED_MESSAGE }, { status: 500 });
   }
 }

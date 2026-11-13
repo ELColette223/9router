@@ -34,6 +34,20 @@ const DEFAULT_CLAIM_STATE = {
   endsAt: null,
 };
 
+// Browser-safe claim copy. Thrown exceptions never reach the browser or persisted
+// state (raw text stays in server logs); only ZCode's server-translated business
+// message (bounded) is user-facing.
+export const ZCODE_CLAIM_FAILED_MESSAGE = "Weekend plan claim failed. It will be retried automatically.";
+export const ZCODE_SESSION_EXPIRED_MESSAGE = "ZCode session expired — re-login to enable claim and resets.";
+const CLAIM_MESSAGE_MAX_CHARS = 200;
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+
+export function sanitizeZcodeClaimMessage(message) {
+  if (typeof message !== "string") return ZCODE_CLAIM_FAILED_MESSAGE;
+  const cleaned = message.replace(CONTROL_CHARS_RE, "").trim().slice(0, CLAIM_MESSAGE_MAX_CHARS).trim();
+  return cleaned || ZCODE_CLAIM_FAILED_MESSAGE;
+}
+
 export function isGlmZcodeEligible(connection) {
   return connection?.provider === "glm"
     && connection?.authType === "oauth"
@@ -189,7 +203,7 @@ async function runMaintenance(connection, proxyOptions) {
                 endsAt: result.plan?.endsAt ?? null,
               };
             } else {
-              claimState = { ...claimState, lastError: result?.message || null };
+              claimState = { ...claimState, lastError: sanitizeZcodeClaimMessage(result?.message) };
             }
           } catch (error) {
             console.warn(`[ZcodeMaintenance] ${id}: claim ${plan?.planId} failed: ${error?.message}`);
@@ -198,7 +212,7 @@ async function runMaintenance(connection, proxyOptions) {
               nextClaimCheckAt = now + C.authCooldownMs;
               break;
             }
-            claimState = { ...claimState, lastError: error?.message || null };
+            claimState = { ...claimState, lastError: ZCODE_CLAIM_FAILED_MESSAGE };
           }
         }
         if (!sessionExpired) {

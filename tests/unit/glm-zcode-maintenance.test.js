@@ -292,6 +292,66 @@ describe("glm zcode maintenance", () => {
     expect(result.zcode.claim.lastError).toBe("already claimed");
   });
 
+  it("thrown claim errors persist only the generic claim failure message", async () => {
+    const raw = "boom: token=secret-xyz";
+    fetchZcodeClaimPreview.mockResolvedValue({
+      serverTime: null,
+      plans: [{ name: "ZCode Weekend Build", planId: "w1" }],
+    });
+    claimZcodePlan.mockRejectedValue(new ZcodeApiError(raw, { kind: "transport" }));
+
+    const result = await runGlmZcodeMaintenance(db.connection);
+
+    const generic = "Weekend plan claim failed. It will be retried automatically.";
+    expect(db.connection.providerSpecificData.zcodeClaimState.lastError).toBe(generic);
+    expect(result.zcode.claim.lastError).toBe(generic);
+    expect(JSON.stringify(result)).not.toContain("secret-xyz");
+    expect(JSON.stringify(db.connection.providerSpecificData)).not.toContain("secret-xyz");
+    expect(db.connection.providerSpecificData.zcodeNextClaimCheckAt).toBe(NOW + 1800000);
+  });
+
+  it("unexpected non-ZCode claim errors persist only the generic claim failure message", async () => {
+    fetchZcodeClaimPreview.mockResolvedValue({
+      serverTime: null,
+      plans: [{ name: "ZCode Weekend Build", planId: "w1" }],
+    });
+    claimZcodePlan.mockRejectedValue(new Error("boom: token=secret-xyz"));
+
+    const result = await runGlmZcodeMaintenance(db.connection);
+
+    expect(result.zcode.claim.lastError).toBe("Weekend plan claim failed. It will be retried automatically.");
+    expect(JSON.stringify(result)).not.toContain("secret-xyz");
+  });
+
+  it("business claim failure copy is bounded: control chars stripped and capped at 200", async () => {
+    fetchZcodeClaimPreview.mockResolvedValue({
+      serverTime: null,
+      plans: [{ name: "ZCode Weekend Build", planId: "w1" }],
+    });
+    const long = `  Plan\u0000 already\u0007 claimed\u001b[31m ${"x".repeat(400)}\n`;
+    claimZcodePlan.mockResolvedValue({ success: false, code: 1003, message: long, plan: null });
+
+    const result = await runGlmZcodeMaintenance(db.connection);
+
+    const lastError = result.zcode.claim.lastError;
+    expect(lastError.startsWith("Plan already claimed[31m x")).toBe(true);
+    expect(lastError).toHaveLength(200);
+    expect(lastError).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(db.connection.providerSpecificData.zcodeClaimState.lastError).toBe(lastError);
+  });
+
+  it("empty business claim failure copy falls back to the generic message", async () => {
+    fetchZcodeClaimPreview.mockResolvedValue({
+      serverTime: null,
+      plans: [{ name: "ZCode Weekend Build", planId: "w1" }],
+    });
+    claimZcodePlan.mockResolvedValue({ success: false, code: 1003, message: " \u0000 ", plan: null });
+
+    const result = await runGlmZcodeMaintenance(db.connection);
+
+    expect(result.zcode.claim.lastError).toBe("Weekend plan claim failed. It will be retried automatically.");
+  });
+
   it("fail-open on client errors", async () => {
     // Both display calls down and both gates parked → defaults, never null or throw.
     db.connection = makeConnection({ zcodeNextOpportunityAt: NOW + 10000000, zcodeNextClaimCheckAt: NOW + 10000000 });
@@ -647,6 +707,54 @@ describe("glm-claim route", () => {
 
     expect(response.status).toBe(401);
     expect(updateProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it("auth errors return the session-expired copy without raw error text", async () => {
+    claimZcodePlan.mockRejectedValue(new ZcodeApiError("401 boom: token=secret-xyz", { kind: "auth", status: 401 }));
+
+    const response = await post({ planId: "w1" });
+    const text = await response.text();
+
+    expect(response.status).toBe(401);
+    expect(JSON.parse(text)).toEqual({ error: "ZCode session expired — re-login to enable claim and resets." });
+    expect(text).not.toContain("secret-xyz");
+  });
+
+  it.each([
+    ["ZCode transport", () => new ZcodeApiError("boom: token=secret-xyz", { kind: "transport" })],
+    ["unexpected", () => new Error("boom: token=secret-xyz")],
+  ])("%s errors return the generic claim failure without raw error text", async (_label, makeError) => {
+    claimZcodePlan.mockRejectedValue(makeError());
+
+    const response = await post({ planId: "w1" });
+    const text = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(JSON.parse(text)).toEqual({ error: "Weekend plan claim failed. It will be retried automatically." });
+    expect(text).not.toContain("secret-xyz");
+    expect(updateProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it("preview errors return the generic claim failure without raw error text", async () => {
+    fetchZcodeClaimPreview.mockRejectedValue(new ZcodeApiError("boom: token=secret-xyz", { kind: "throttled" }));
+
+    const response = await post();
+    const text = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(text).not.toContain("secret-xyz");
+  });
+
+  it("bounds business failure copy in the response", async () => {
+    claimZcodePlan.mockResolvedValue({ success: false, code: 1003, message: `\u0000already claimed${"x".repeat(300)}`, plan: null });
+
+    const response = await post({ planId: "w1" });
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(json.success).toBe(false);
+    expect(json.message).toHaveLength(200);
+    expect(json.message.startsWith("already claimed")).toBe(true);
   });
 
   it("404 for unknown connection", async () => {

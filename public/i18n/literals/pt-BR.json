@@ -1140,6 +1140,8 @@
   "Weekend plan": "Plano de fim de semana",
   "Next Weekend claim check:": "Próxima verificação de resgate do plano de fim de semana:",
   "ZCode session expired — re-login to enable claim and resets.": "Sessão do ZCode expirada — faça login novamente para habilitar resgates e redefinições.",
+  "Plan balance is temporarily unavailable.": "O saldo do plano está temporariamente indisponível.",
+  "Weekend plan claim failed. It will be retried automatically.": "Falha ao resgatar o plano de fim de semana. Uma nova tentativa será feita automaticamente.",
   "[ml] downloads ~1 GB (torch + huggingface-hub). Continue?": "[ml] baixa ~1 GB (torch + huggingface-hub). Continuar?",
   "e.g. a warm, gentle voice, speaking slowly with a British accent": "ex.: voz quente e suave, falando devagar com sotaque britânico",
   "extras status failed": "falha no status dos extras",
