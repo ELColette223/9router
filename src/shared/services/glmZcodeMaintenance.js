@@ -4,7 +4,7 @@
 // degrades the enrichment, never breaks the quota response.
 import { randomUUID } from "node:crypto";
 
-import { getProviderConnectionById, updateProviderConnection, getSettings } from "@/lib/localDb";
+import { getProviderConnectionById, updateProviderConnection, getSettings, getOrCreateZcodeDeviceMid } from "@/lib/localDb";
 import {
   ZcodeApiError,
   fetchZcodeResetStatus,
@@ -100,11 +100,11 @@ async function runMaintenance(connection, proxyOptions) {
     if (isAuthError(error)) sessionExpired = true;
   }
 
-  // Display: weekend buckets come from the coding-plan API key balance.
-  // Balance authenticates with the API key, not the OAuth JWT, so it neither
-  // sets nor clears the expired-session flag.
+  // Display: weekend buckets require the OAuth JWT plus an installation-local device identity.
+  // Balance failures neither set nor clear the expired-session flag.
   try {
-    balance = await fetchZcodePlanBalance({ apiKey: connection.accessToken, proxyOptions });
+    const deviceMid = await getOrCreateZcodeDeviceMid();
+    balance = await fetchZcodePlanBalance({ zcodeJwt, deviceMid, proxyOptions });
   } catch (error) {
     console.warn(`[ZcodeMaintenance] ${id}: plan balance failed: ${error?.message}`);
   }

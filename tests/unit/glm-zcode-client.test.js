@@ -254,6 +254,55 @@ describe("claimZcodePlan", () => {
 });
 
 describe("fetchZcodePlanBalance", () => {
+  const DEVICE_MID = "550e8400-e29b-41d4-a716-446655440000";
+
+  it("sends the ZCode JWT and source device headers", async () => {
+    proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 0, data: { plans: [], balances: [] } }));
+
+    await fetchZcodePlanBalance({ zcodeJwt: "jwt-x", deviceMid: DEVICE_MID });
+
+    const [url, options] = proxyAwareFetch.mock.calls[0];
+    expect(url).toContain("/api/v1/zcode-plan/billing/balance?app_version=3.18.0");
+    expect(options.headers).toMatchObject({
+      Authorization: "Bearer jwt-x",
+      Accept: "application/json",
+      "User-Agent": "ZCode/3.18.0",
+      "HTTP-Referer": "https://zcode.z.ai",
+      "X-Title": "Z Code@9router",
+      "X-ZCode-App-Version": "3.18.0",
+      "X-Platform": PLATFORM,
+      "X-Os-Category": process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",
+      "X-Device-Mid": DEVICE_MID,
+    });
+  });
+
+  it.each([
+    { deviceMid: DEVICE_MID },
+    { zcodeJwt: "jwt-x" },
+  ])("rejects missing balance identity before network", async (input) => {
+    const error = await fetchZcodePlanBalance(input).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("business");
+    expect(proxyAwareFetch).not.toHaveBeenCalled();
+  });
+
+  it("reports non-JSON balance errors with safe diagnostics", async () => {
+    const body = "<html>bad</html>";
+    proxyAwareFetch.mockResolvedValueOnce(
+      new Response(body, { status: 400, headers: { "Content-Type": "text/html" } }),
+    );
+
+    const error = await fetchZcodePlanBalance({ zcodeJwt: "jwt-x", deviceMid: DEVICE_MID }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ZcodeApiError);
+    expect(error.kind).toBe("transport");
+    expect(error.status).toBe(400);
+    expect(error.contentType).toBe("text/html");
+    expect(error.responseBytes).toBe(new TextEncoder().encode(body).byteLength);
+    expect(error.message).not.toContain(body);
+  });
+
   it("keeps active plans and normalizes string units", async () => {
     proxyAwareFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -277,7 +326,7 @@ describe("fetchZcodePlanBalance", () => {
       })
     );
 
-    const result = await fetchZcodePlanBalance({ apiKey: "key-x" });
+    const result = await fetchZcodePlanBalance({ zcodeJwt: "jwt-x", deviceMid: DEVICE_MID });
 
     expect(result.plans).toHaveLength(1);
     expect(result.plans[0].planId).toBe("p1");
@@ -294,7 +343,7 @@ describe("fetchZcodePlanBalance", () => {
     expect(url).toContain("/api/v1/zcode-plan/billing/balance");
     expect(url).toContain("app_version=3.18.0");
     expect(options.method).toBe("GET");
-    expect(options.headers).toMatchObject({ Authorization: "Bearer key-x" });
+    expect(options.headers).toMatchObject({ Authorization: "Bearer jwt-x", "X-Device-Mid": DEVICE_MID });
   });
 
   it("falls back remaining to available then total-used", async () => {
@@ -311,7 +360,7 @@ describe("fetchZcodePlanBalance", () => {
       })
     );
 
-    const result = await fetchZcodePlanBalance({ apiKey: "key-x" });
+    const result = await fetchZcodePlanBalance({ zcodeJwt: "jwt-x", deviceMid: DEVICE_MID });
 
     expect(result.balances[0].remainingUnits).toBe(500);
     expect(result.balances[1].remainingUnits).toBe(800);
@@ -320,7 +369,7 @@ describe("fetchZcodePlanBalance", () => {
   it("empty data yields empty arrays", async () => {
     proxyAwareFetch.mockResolvedValueOnce(jsonResponse({ code: 0, data: null }));
 
-    const result = await fetchZcodePlanBalance({ apiKey: "key-x" });
+    const result = await fetchZcodePlanBalance({ zcodeJwt: "jwt-x", deviceMid: DEVICE_MID });
 
     expect(result.plans).toEqual([]);
     expect(result.balances).toEqual([]);

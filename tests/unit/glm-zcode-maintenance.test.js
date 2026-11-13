@@ -17,6 +17,7 @@ vi.mock("@/lib/localDb", () => ({
   getProviderConnectionById: vi.fn(),
   updateProviderConnection: vi.fn(),
   getSettings: vi.fn(),
+  getOrCreateZcodeDeviceMid: vi.fn(),
 }));
 
 const NOW = 1700000000000;
@@ -54,6 +55,7 @@ describe("glm zcode maintenance", () => {
   let getProviderConnectionById;
   let updateProviderConnection;
   let getSettings;
+  let getOrCreateZcodeDeviceMid;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -70,7 +72,7 @@ describe("glm zcode maintenance", () => {
       fetchZcodeResetStatus,
       requestZcodeResetOpportunity,
     } = await import("open-sse/services/usage/glmZcode.js"));
-    ({ getProviderConnectionById, updateProviderConnection, getSettings } = await import("@/lib/localDb"));
+    ({ getProviderConnectionById, updateProviderConnection, getSettings, getOrCreateZcodeDeviceMid } = await import("@/lib/localDb"));
     ({ isGlmZcodeEligible, runGlmZcodeMaintenance } = await import("@/shared/services/glmZcodeMaintenance.js"));
 
     // In-memory DB: connection row + settings, merged on update like the real repo.
@@ -83,6 +85,7 @@ describe("glm zcode maintenance", () => {
       return db.connection;
     });
     getSettings.mockImplementation(async () => db.settings);
+    getOrCreateZcodeDeviceMid.mockResolvedValue("550e8400-e29b-41d4-a716-446655440000");
 
     fetchZcodeResetStatus.mockResolvedValue(emptyStatus());
     fetchZcodePlanBalance.mockResolvedValue(emptyBalance());
@@ -125,6 +128,13 @@ describe("glm zcode maintenance", () => {
 
     const result = await runGlmZcodeMaintenance(db.connection);
 
+    expect(getOrCreateZcodeDeviceMid).toHaveBeenCalledTimes(1);
+    expect(fetchZcodePlanBalance).toHaveBeenCalledWith({
+      zcodeJwt: "jwt",
+      deviceMid: "550e8400-e29b-41d4-a716-446655440000",
+      proxyOptions: null,
+    });
+    expect(fetchZcodePlanBalance.mock.calls[0][0]).not.toHaveProperty("apiKey");
     expect(Object.keys(result.quotas)).toEqual(["Weekend · GLM-5.3-Flash"]);
     expect(result.quotas["Weekend · GLM-5.3-Flash"]).toEqual({
       used: 1000,
@@ -289,6 +299,20 @@ describe("glm zcode maintenance", () => {
       },
     });
     expect(updateProviderConnection).not.toHaveBeenCalled();
+  });
+
+  it("device MID failure is fail-open while reset and claim mechanics continue", async () => {
+    getOrCreateZcodeDeviceMid.mockRejectedValue(new Error("storage unavailable"));
+    fetchZcodeResetStatus.mockResolvedValue({ ...emptyStatus(), week: [{ expireAt: NOW + 1000 }] });
+    fetchZcodeClaimPreview.mockResolvedValue({ serverTime: null, plans: [{ name: "ZCode Weekend Build", planId: "w1" }] });
+
+    const result = await runGlmZcodeMaintenance(db.connection);
+
+    expect(result.quotas).toEqual({});
+    expect(result.zcode.resets.week).toEqual({ count: 1, soonestExpireAt: NOW + 1000 });
+    expect(fetchZcodePlanBalance).not.toHaveBeenCalled();
+    expect(fetchZcodeClaimPreview).toHaveBeenCalledTimes(1);
+    expect(requestZcodeResetOpportunity).toHaveBeenCalledTimes(1);
   });
 
   it("balance failure still returns status enrichment", async () => {

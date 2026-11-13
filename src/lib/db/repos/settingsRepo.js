@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 
@@ -125,6 +127,25 @@ export async function updateSettings(updates) {
   return mergeWithDefaults(next);
 }
 
+export async function getOrCreateZcodeDeviceMid() {
+  const db = await getAdapter();
+  let deviceMid;
+  db.transaction(function () {
+    const row = db.get(`SELECT data FROM settings WHERE id = 1`);
+    const current = row ? parseJson(row.data, {}) : {};
+    if (typeof current.zcodeDeviceMid === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(current.zcodeDeviceMid)) {
+      deviceMid = current.zcodeDeviceMid;
+      return;
+    }
+    deviceMid = randomUUID();
+    db.run(
+      `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
+      [stringifyJson({ ...current, zcodeDeviceMid: deviceMid })],
+    );
+  });
+  return deviceMid;
+}
+
 export async function isCloudEnabled() {
   const settings = await getSettings();
   return settings.cloudEnabled === true;
@@ -141,5 +162,6 @@ export async function getCloudUrl() {
 }
 
 export async function exportSettings() {
-  return await readRaw();
+  const { zcodeDeviceMid, ...settings } = await readRaw();
+  return settings;
 }

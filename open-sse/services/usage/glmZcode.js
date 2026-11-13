@@ -16,12 +16,14 @@ const ZCODE_PLATFORM = `${process.platform}-${process.arch}`;
 const ZCODE_TIMEOUT_MS = 15000;
 
 export class ZcodeApiError extends Error {
-  constructor(message, { kind = "transport", code = null, status = null } = {}) {
+  constructor(message, { kind = "transport", code = null, status = null, contentType = null, responseBytes = null } = {}) {
     super(message);
     this.name = "ZcodeApiError";
     this.kind = kind; // "auth" | "throttled" | "business" | "transport"
     this.code = code;
     this.status = status;
+    if (contentType !== null) this.contentType = contentType;
+    if (responseBytes !== null) this.responseBytes = responseBytes;
   }
 }
 
@@ -89,14 +91,17 @@ async function zcodeRequest(url, { method = "GET", headers, body = null }, proxy
     throw new ZcodeApiError(`ZCode request failed: ${error.message}`, { kind: "transport" });
   }
 
+  const text = await response.text();
   let json;
   try {
-    json = await response.json();
+    json = JSON.parse(text);
   } catch {
-    throw new ZcodeApiError("ZCode API returned invalid JSON", {
-      kind: "transport",
-      status: response.status,
-    });
+    const contentType = response.headers.get("content-type") || "unknown";
+    const responseBytes = new TextEncoder().encode(text).byteLength;
+    throw new ZcodeApiError(
+      `ZCode API returned non-JSON response (HTTP ${response.status}, ${contentType}, ${responseBytes} bytes)`,
+      { kind: "transport", status: response.status, contentType, responseBytes },
+    );
   }
   return { json, status: response.status };
 }
@@ -179,15 +184,31 @@ export async function claimZcodePlan({ zcodeJwt, planId, proxyOptions = null }) 
   };
 }
 
+function zcodeSourceHeaders({ deviceMid }) {
+  return {
+    Accept: "application/json",
+    "User-Agent": `ZCode/${ZCODE_APP_VERSION}`,
+    "HTTP-Referer": "https://zcode.z.ai",
+    "X-Title": "Z Code@9router",
+    "X-ZCode-App-Version": ZCODE_APP_VERSION,
+    "X-Platform": ZCODE_PLATFORM,
+    "X-Os-Category": process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",
+    "X-Device-Mid": deviceMid,
+  };
+}
+
 /**
- * GET billing/balance — active plans + per-bucket usage for a coding-plan API key.
+ * GET billing/balance — active plans + per-bucket usage for a ZCode OAuth JWT and device identity.
  * Only status === "active" plans are kept; units normalized via toFiniteNumber.
  */
-export async function fetchZcodePlanBalance({ apiKey, proxyOptions = null }) {
+export async function fetchZcodePlanBalance({ zcodeJwt, deviceMid, proxyOptions = null }) {
+  if (typeof zcodeJwt !== "string" || !zcodeJwt.trim() || typeof deviceMid !== "string" || !deviceMid.trim()) {
+    throw new ZcodeApiError("ZCode balance requires JWT and device identity", { kind: "business" });
+  }
   const query = new URLSearchParams({ app_version: ZCODE_APP_VERSION });
   const { json, status } = await zcodeRequest(
     `${ZCODE_ORIGIN}/api/v1/zcode-plan/billing/balance?${query}`,
-    { headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" } },
+    { headers: { Authorization: `Bearer ${zcodeJwt}`, ...zcodeSourceHeaders({ deviceMid }) } },
     proxyOptions,
   );
   const { data } = unwrapZcodeEnvelope(json, status);
