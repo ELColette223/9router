@@ -34,15 +34,36 @@ describe("ZCode device MID persistence", () => {
     expect(exported).not.toHaveProperty("zcodeDeviceMid");
   });
 
-  it("preserves the local device MID when importing a backup without it", async () => {
-    const originalMid = await db.getOrCreateZcodeDeviceMid();
-    await db.updateSettings({ cloudEnabled: true });
+  it("preserves the existing local device MID when an import supplies another valid MID", async () => {
+    const localMid = await db.getOrCreateZcodeDeviceMid();
+    const injectedMid = localMid === "550e8400-e29b-41d4-a716-446655440000"
+      ? "550e8400-e29b-41d4-a716-446655440001"
+      : "550e8400-e29b-41d4-a716-446655440000";
     const backup = await db.exportDb();
-    backup.settings = { ...backup.settings, cloudEnabled: false };
+    backup.settings = { ...backup.settings, zcodeDeviceMid: injectedMid };
 
     await db.importDb(backup);
 
-    expect(await db.getOrCreateZcodeDeviceMid()).toBe(originalMid);
+    expect((await db.getOrCreateZcodeDeviceMid()) === localMid).toBe(true);
+    expect(await db.exportDb()).not.toMatchObject({ settings: { zcodeDeviceMid: expect.any(String) } });
+  });
+
+  it("drops an imported device MID before creating a new local one", async () => {
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const adapter = await getAdapter();
+    adapter.run(`DELETE FROM settings`);
+
+    const backup = await db.exportDb();
+    backup.settings = {
+      ...backup.settings,
+      zcodeDeviceMid: "550e8400-e29b-41d4-a716-446655440000",
+    };
+
+    await db.importDb(backup);
+
+    const rawSettings = JSON.parse(adapter.get(`SELECT data FROM settings WHERE id = 1`)?.data || "{}");
+    expect(rawSettings).not.toHaveProperty("zcodeDeviceMid");
+    expect(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(await db.getOrCreateZcodeDeviceMid())).toBe(true);
     expect(await db.exportDb()).not.toMatchObject({ settings: { zcodeDeviceMid: expect.any(String) } });
   });
 
