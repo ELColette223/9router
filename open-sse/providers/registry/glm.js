@@ -5,7 +5,7 @@ export default {
   priority: 140,
   alias: "glm",
   display: {
-    name: "Zai GLM Coding",
+    name: "GLM Zcode",
     icon: "code",
     color: "#2563EB",
     textIcon: "GL",
@@ -32,6 +32,7 @@ export default {
     businessLoginUrl: "https://api.z.ai/api/auth/z/login",
     apiBaseUrl: "https://api.z.ai",
     planApiKeyName: "zcode-api-key",
+    zcodeApiBaseUrl: "https://zcode.z.ai",
   },
   transport: {
     baseUrl: "https://api.z.ai/api/anthropic/v1/messages",

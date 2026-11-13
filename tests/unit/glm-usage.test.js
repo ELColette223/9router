@@ -11,6 +11,8 @@ import {
   USAGE_SUPPORTED_PROVIDERS,
   USAGE_APIKEY_PROVIDERS,
 } from "../../src/shared/constants/providers.js";
+import { PROVIDER_OAUTH } from "../../open-sse/providers/index.js";
+import glmRegistry from "../../open-sse/providers/registry/glm.js";
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -72,6 +74,11 @@ describe("glm registry usage flags", () => {
     expect(USAGE_SUPPORTED_PROVIDERS).toContain("glm-cn");
     expect(USAGE_APIKEY_PROVIDERS).toContain("glm");
     expect(USAGE_APIKEY_PROVIDERS).toContain("glm-cn");
+  });
+
+  it("is renamed to GLM Zcode with a zcode api base url", () => {
+    expect(glmRegistry.display.name).toBe("GLM Zcode");
+    expect(PROVIDER_OAUTH.glm.zcodeApiBaseUrl).toBe("https://zcode.z.ai");
   });
 });
 

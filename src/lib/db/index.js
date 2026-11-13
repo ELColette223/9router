@@ -4,9 +4,17 @@ import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
 import { keyAccessFromColumns, keyAccessToColumns, validateKeyAccessInput } from "@/shared/utils/keyAccess.js";
 import { KEY_ACCESS_UNRESTRICTED } from "@/shared/constants/keyAccess.js";
 
+const ZCODE_DEVICE_MID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function getValidZcodeDeviceMid(settings) {
+  return typeof settings?.zcodeDeviceMid === "string" && ZCODE_DEVICE_MID_PATTERN.test(settings.zcodeDeviceMid)
+    ? settings.zcodeDeviceMid
+    : null;
+}
+
 // Settings
 export {
-  getSettings, updateSettings, isCloudEnabled, getCloudUrl, exportSettings,
+  getSettings, updateSettings, getOrCreateZcodeDeviceMid, isCloudEnabled, getCloudUrl, exportSettings,
 } from "./repos/settingsRepo.js";
 
 // Provider connections
@@ -102,6 +110,8 @@ export async function importDb(payload) {
   const db = await getAdapter();
 
   db.transaction(() => {
+    const localZcodeDeviceMid = getValidZcodeDeviceMid(parseJson(db.get(`SELECT data FROM settings WHERE id = 1`)?.data, {}));
+
     // Wipe all tables (keep _meta)
     db.run(`DELETE FROM settings`);
     db.run(`DELETE FROM providerConnections`);
@@ -111,9 +121,12 @@ export async function importDb(payload) {
     db.run(`DELETE FROM combos`);
     db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`);
 
-    // Settings
-    if (payload.settings) {
-      db.run(`INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, [stringifyJson(payload.settings)]);
+    // Settings: retain the installation-local identity rather than restoring it from a backup.
+    const importedSettings = payload.settings ? { ...payload.settings } : {};
+    delete importedSettings.zcodeDeviceMid;
+    if (localZcodeDeviceMid) importedSettings.zcodeDeviceMid = localZcodeDeviceMid;
+    if (payload.settings || localZcodeDeviceMid) {
+      db.run(`INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, [stringifyJson(importedSettings)]);
     }
 
     for (const c of payload.providerConnections || []) {

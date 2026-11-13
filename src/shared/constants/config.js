@@ -92,6 +92,20 @@ export const QUOTA_AUTOPING_CONFIG = {
   },
 };
 
+// GLM Zcode maintenance: epoch-gated reset opportunity + weekend auto-claim on usage polls.
+export const GLM_ZCODE_CONFIG = {
+  opportunityGrantedMs: 600000,         // grace after a granted reset opportunity
+  opportunityMinRetryMs: 300000,        // floor for the server next_try_at on denial
+  opportunityErrorCooldownMs: 600000,   // backoff on throttled/business opportunity errors
+  opportunityTransientRetryMs: 300000,  // sooner retry on transport opportunity errors
+  authCooldownMs: 86400000,             // park opportunity/claim gates for 24h after an auth failure (display status still polls)
+  claimEmptyPreviewMs: 1800000,         // re-check preview when no weekend plan is offered
+  claimSuccessMs: 21600000,             // re-check after a successful weekend claim
+  claimFailureMs: 1800000,              // retry after a failed claim/preview
+  enrichCacheTtlMs: 60000,              // per-connection enrichment cache TTL
+  resetOpportunityBumpMs: 120000,       // opportunity gate bump after a reset is consumed
+};
+
 // Re-export from providers.js for backward compatibility
 export {
   FREE_PROVIDERS,

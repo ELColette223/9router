@@ -509,6 +509,17 @@ Translations are selected dynamically based on source payload shape and provider
 
 - DB shape migration/repair for missing keys
 - corrupt JSON reset safeguards for localDb and usageDb
+- ZCode device MID is a server-only, installation-local UUID: `/api/settings` neither accepts nor returns it, database exports omit it, and `importDb()` restores only the pre-import valid local value. The internal `getOrCreateZcodeDeviceMid()` path owns creation and direct persistence.
+
+## GLM ZCode usage enrichment (bonus quota, reset gates, Weekend claim)
+
+> Findable terms: GLM OAuth, ZCode, coding plan, Weekend bonus, plan balance, reset opportunity, auto-claim, quota dashboard
+
+`runGlmZcodeMaintenance()` in `src/shared/services/glmZcodeMaintenance.js` enriches only GLM OAuth usage results with `raw.zcode`; API-key GLM and `glm-cn` usage remain unchanged. It is fail-open: status, balance, reset-opportunity, claim-preview, and persistence errors never prevent the base quota response.
+
+- `raw.zcode.codingPlan.balance` reports non-sensitive plan-balance state: `available` means the balance request completed (including zero active Weekend buckets), `error` carries only the safe error message, and `unavailable` means a last-resort fallback did not attempt the request. `activeWeekendBucketCount` uses the same active Weekend-plan filter as the injected quota rows.
+- `raw.zcode.codingPlan.gate` carries final maintenance-cycle `nextOpportunityAt` and `nextClaimCheckAt` epoch-millisecond values. These are resolved server cooldowns/configured backoffs or persisted gate values; no device MID, JWT, credentials, headers, response bodies, or API error metadata are exposed.
+- The dashboard's `ProviderLimits` GLM OAuth card always renders a compact **ZCode Coding Plan** panel below quota rows. It explains Weekend bonus availability, reset counts, claim availability/auto-claim state, and non-null reset/claim gate timings. Gate times at or before the browser clock read `Checking now`; other quota countdowns keep their existing expiry wording.
 
 ## Observability and Operational Signals
 

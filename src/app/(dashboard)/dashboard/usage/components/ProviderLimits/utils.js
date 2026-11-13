@@ -877,6 +877,7 @@ export function parseQuotaData(provider, data) {
               percentageIsUsed: quota.percentageIsUsed === true,
               resetAt: quota.resetAt || null,
               emptyMessage: quota.emptyMessage || null,
+              recurring: quota.recurring,
             });
           });
         }
