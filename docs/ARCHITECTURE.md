@@ -509,6 +509,7 @@ Translations are selected dynamically based on source payload shape and provider
 
 - DB shape migration/repair for missing keys
 - corrupt JSON reset safeguards for localDb and usageDb
+- ZCode device MID is a server-only, installation-local UUID: `/api/settings` neither accepts nor returns it, database exports omit it, and `importDb()` restores only the pre-import valid local value. The internal `getOrCreateZcodeDeviceMid()` path owns creation and direct persistence.
 
 ## Observability and Operational Signals
 

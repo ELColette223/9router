@@ -33,4 +33,27 @@ describe("ZCode device MID persistence", () => {
     expect(second).toBe(first);
     expect(exported).not.toHaveProperty("zcodeDeviceMid");
   });
+
+  it("preserves the local device MID when importing a backup without it", async () => {
+    const originalMid = await db.getOrCreateZcodeDeviceMid();
+    await db.updateSettings({ cloudEnabled: true });
+    const backup = await db.exportDb();
+    backup.settings = { ...backup.settings, cloudEnabled: false };
+
+    await db.importDb(backup);
+
+    expect(await db.getOrCreateZcodeDeviceMid()).toBe(originalMid);
+    expect(await db.exportDb()).not.toMatchObject({ settings: { zcodeDeviceMid: expect.any(String) } });
+  });
+
+  it("does not restore an invalid local device MID through import", async () => {
+    await db.updateSettings({ zcodeDeviceMid: "invalid-device-mid" });
+    const backup = await db.exportDb();
+
+    await db.importDb(backup);
+
+    expect(await db.getSettings()).not.toHaveProperty("zcodeDeviceMid");
+    expect(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(await db.getOrCreateZcodeDeviceMid())).toBe(true);
+    expect(await db.exportDb()).not.toMatchObject({ settings: { zcodeDeviceMid: expect.any(String) } });
+  });
 });
