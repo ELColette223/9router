@@ -317,7 +317,7 @@ describe("glm zcode maintenance", () => {
           endsAt: null,
         },
         codingPlan: {
-          balance: { status: "error", activeWeekendBucketCount: 0, error: "down" },
+          balance: { status: "error", activeWeekendBucketCount: 0, error: "Plan balance is temporarily unavailable." },
           gate: {
             nextOpportunityAt: NOW + 10000000,
             nextClaimCheckAt: NOW + 10000000,
@@ -343,9 +343,10 @@ describe("glm zcode maintenance", () => {
     expect(requestZcodeResetOpportunity).toHaveBeenCalledTimes(1);
   });
 
-  it("reports a safe balance error while the rest of maintenance resolves", async () => {
+  it("exposes only the generic balance failure message while the rest of maintenance resolves", async () => {
+    const upstreamError = "upstream 503: account=private-token; request-id=abc123";
     fetchZcodeResetStatus.mockResolvedValue({ ...emptyStatus(), week: [{ expireAt: NOW + 5000 }, { expireAt: NOW + 1000 }] });
-    fetchZcodePlanBalance.mockRejectedValue(new Error("balance service unavailable"));
+    fetchZcodePlanBalance.mockRejectedValue(new Error(upstreamError));
 
     const result = await runGlmZcodeMaintenance(db.connection);
 
@@ -354,8 +355,9 @@ describe("glm zcode maintenance", () => {
     expect(result.zcode.codingPlan.balance).toEqual({
       status: "error",
       activeWeekendBucketCount: 0,
-      error: "balance service unavailable",
+      error: "Plan balance is temporarily unavailable.",
     });
+    expect(JSON.stringify(result)).not.toContain(upstreamError);
   });
 
   it("returns unavailable balance state with persisted gates after an unexpected failure", async () => {

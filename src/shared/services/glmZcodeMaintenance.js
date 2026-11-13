@@ -111,8 +111,9 @@ async function runMaintenance(connection, proxyOptions) {
     balance = await fetchZcodePlanBalance({ zcodeJwt, deviceMid, proxyOptions });
     balanceSucceeded = true;
   } catch (error) {
-    balanceError = typeof error?.message === "string" ? error.message : null;
-    console.warn(`[ZcodeMaintenance] ${id}: plan balance failed: ${balanceError}`);
+    const rawBalanceError = typeof error?.message === "string" ? error.message : null;
+    balanceError = "Plan balance is temporarily unavailable.";
+    console.warn(`[ZcodeMaintenance] ${id}: plan balance failed: ${rawBalanceError}`);
   }
 
   // Gate 1: request reset opportunities (one call covers both reset types).

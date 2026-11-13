@@ -153,11 +153,13 @@ function formatTimeRemaining(value) {
   return days > 0 ? `${days}d ${hours}h` : `${hours}h`;
 }
 
-function formatZcodeGateTime(value) {
+function isZcodeGateDue(value) {
   const timestamp = new Date(value).getTime();
-  return Number.isFinite(timestamp) && timestamp <= Date.now()
-    ? "Checking now"
-    : formatTimeRemaining(value);
+  return Number.isFinite(timestamp) && timestamp <= Date.now();
+}
+
+function formatZcodeGateTime(value) {
+  return formatTimeRemaining(value);
 }
 
 export default function ProviderLimits() {
@@ -1565,34 +1567,68 @@ export default function ProviderLimits() {
                   const fiveHourCount = glmZcode.resets?.fiveHour?.count ?? 0;
                   const weekCount = glmZcode.resets?.week?.count ?? 0;
                   const claim = glmZcode.claim || {};
-                  const resetAction = fiveHourCount > 0 || weekCount > 0
-                    ? " Use the reset buttons above to consume one."
-                    : "";
-                  const claimStatus = claim.available
-                    ? `Weekend plan ready to claim: ${claim.planName || "Weekend plan"}.`
-                    : "No Weekend plan is currently available to claim.";
+                  const hasResetOpportunities = fiveHourCount > 0 || weekCount > 0;
                   return (
                     <div className="mt-2 border-t border-black/5 px-1 pt-2 text-[10px] leading-relaxed text-text-muted dark:border-white/5">
                       <p className="flex items-center gap-1 font-medium text-text-primary">
                         <span className="material-symbols-outlined text-[13px]">account_balance_wallet</span>
-                        ZCode Coding Plan
+                        <span>ZCode Coding Plan</span>
                       </p>
-                      <p>
-                        {balance.status === "available"
-                          ? balance.activeWeekendBucketCount > 0
-                            ? `Bonus quota: ${balance.activeWeekendBucketCount} active bucket(s) shown above.`
-                            : "Bonus quota: no active Weekend bonus quota."
-                          : balance.status === "error"
-                            ? `Bonus quota could not be loaded: ${balance.error || "Unknown error"}.`
-                            : "Bonus quota status is waiting for the next refresh."}
-                      </p>
-                      <p>{`Reset opportunities: ${fiveHourCount} 5-hour · ${weekCount} weekly.${resetAction}`}</p>
-                      {gate.nextOpportunityAt != null && (
-                        <p>{`Next reset opportunity check: ${formatZcodeGateTime(gate.nextOpportunityAt)}.`}</p>
+                      {balance.status === "available" ? (
+                        balance.activeWeekendBucketCount > 0 ? (
+                          <p>
+                            <span>Bonus quota:</span>{" "}
+                            <span>{balance.activeWeekendBucketCount}</span>{" "}
+                            <span>active bucket(s) shown above.</span>
+                          </p>
+                        ) : (
+                          <p>No active Weekend bonus quota.</p>
+                        )
+                      ) : balance.status === "error" ? (
+                        <p>
+                          <span>Bonus quota could not be loaded:</span>{" "}
+                          <span>{balance.error}</span>
+                        </p>
+                      ) : (
+                        <p>Bonus quota status is waiting for the next refresh.</p>
                       )}
-                      <p>{`${claimStatus} ${claim.autoClaim ? "Auto-claim is on." : "Auto-claim is off."}`}</p>
+                      <p>
+                        <span>Reset opportunities:</span>{" "}
+                        <span>{fiveHourCount}</span>{" "}<span>5-hour</span>{" · "}
+                        <span>{weekCount}</span>{" "}<span>weekly.</span>
+                        {hasResetOpportunities && <> <span>Use the reset buttons above to consume one.</span></>}
+                      </p>
+                      {gate.nextOpportunityAt != null && (
+                        <p>
+                          <span>Next reset opportunity check:</span>{" "}
+                          {isZcodeGateDue(gate.nextOpportunityAt) ? (
+                            <span>Checking now</span>
+                          ) : (
+                            <span>{formatZcodeGateTime(gate.nextOpportunityAt)}.</span>
+                          )}
+                        </p>
+                      )}
+                      {claim.available ? (
+                        <p>
+                          <span>Weekend plan ready to claim:</span>{" "}
+                          {claim.planName ? <span>{claim.planName}.</span> : <><span>Weekend plan</span><span>.</span></>}{" "}
+                          {claim.autoClaim ? <span>Auto-claim is on.</span> : <span>Auto-claim is off.</span>}
+                        </p>
+                      ) : (
+                        <p>
+                          <span>No Weekend plan is currently available to claim.</span>{" "}
+                          {claim.autoClaim ? <span>Auto-claim is on.</span> : <span>Auto-claim is off.</span>}
+                        </p>
+                      )}
                       {gate.nextClaimCheckAt != null && (
-                        <p>{`Next Weekend claim check: ${formatZcodeGateTime(gate.nextClaimCheckAt)}.`}</p>
+                        <p>
+                          <span>Next Weekend claim check:</span>{" "}
+                          {isZcodeGateDue(gate.nextClaimCheckAt) ? (
+                            <span>Checking now</span>
+                          ) : (
+                            <span>{formatZcodeGateTime(gate.nextClaimCheckAt)}.</span>
+                          )}
+                        </p>
                       )}
                     </div>
                   );
