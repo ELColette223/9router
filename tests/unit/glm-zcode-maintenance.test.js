@@ -148,8 +148,29 @@ describe("glm zcode maintenance", () => {
     });
     expect(result.zcode.resets.fiveHour).toEqual({ count: 1, soonestExpireAt: 1700000000000 });
     expect(result.zcode.resets.week).toEqual({ count: 0, soonestExpireAt: null });
+    expect(result.zcode.codingPlan).toEqual({
+      balance: { status: "available", activeWeekendBucketCount: 1, error: null },
+      gate: {
+        nextOpportunityAt: NOW + 300000,
+        nextClaimCheckAt: NOW + 1800000,
+      },
+    });
     expect(result.zcode.claim.autoClaim).toBe(true);
     expect(result.zcode.sessionExpired).toBe(false);
+  });
+
+  it("reports an available coding plan balance when there are no weekend buckets", async () => {
+    db.connection = makeConnection({ zcodeNextOpportunityAt: NOW + 10000000, zcodeNextClaimCheckAt: NOW + 10000000 });
+
+    const result = await runGlmZcodeMaintenance(db.connection);
+
+    expect(result.zcode.codingPlan).toEqual({
+      balance: { status: "available", activeWeekendBucketCount: 0, error: null },
+      gate: {
+        nextOpportunityAt: NOW + 10000000,
+        nextClaimCheckAt: NOW + 10000000,
+      },
+    });
   });
 
   it("skips opportunity before epoch, calls when due", async () => {
@@ -295,6 +316,13 @@ describe("glm zcode maintenance", () => {
           lastClaimedAt: null,
           endsAt: null,
         },
+        codingPlan: {
+          balance: { status: "error", activeWeekendBucketCount: 0, error: "down" },
+          gate: {
+            nextOpportunityAt: NOW + 10000000,
+            nextClaimCheckAt: NOW + 10000000,
+          },
+        },
         sessionExpired: false,
       },
     });
@@ -315,14 +343,46 @@ describe("glm zcode maintenance", () => {
     expect(requestZcodeResetOpportunity).toHaveBeenCalledTimes(1);
   });
 
-  it("balance failure still returns status enrichment", async () => {
+  it("reports a safe balance error while the rest of maintenance resolves", async () => {
     fetchZcodeResetStatus.mockResolvedValue({ ...emptyStatus(), week: [{ expireAt: NOW + 5000 }, { expireAt: NOW + 1000 }] });
-    fetchZcodePlanBalance.mockRejectedValue(new Error("boom"));
+    fetchZcodePlanBalance.mockRejectedValue(new Error("balance service unavailable"));
 
     const result = await runGlmZcodeMaintenance(db.connection);
 
     expect(result.quotas).toEqual({});
     expect(result.zcode.resets.week).toEqual({ count: 2, soonestExpireAt: NOW + 1000 });
+    expect(result.zcode.codingPlan.balance).toEqual({
+      status: "error",
+      activeWeekendBucketCount: 0,
+      error: "balance service unavailable",
+    });
+  });
+
+  it("returns unavailable balance state with persisted gates after an unexpected failure", async () => {
+    const psd = {
+      zcodeJwtToken: "jwt",
+      zcodeNextOpportunityAt: NOW + 111000,
+      zcodeNextClaimCheckAt: NOW + 222000,
+    };
+    Object.defineProperty(psd, "zaiBusinessToken", {
+      enumerable: true,
+      get() {
+        throw new Error("unexpected maintenance failure");
+      },
+    });
+    db.connection = makeConnection();
+    db.connection.providerSpecificData = psd;
+
+    const result = await runGlmZcodeMaintenance(db.connection);
+
+    expect(fetchZcodePlanBalance).not.toHaveBeenCalled();
+    expect(result.zcode.codingPlan).toEqual({
+      balance: { status: "unavailable", activeWeekendBucketCount: 0, error: null },
+      gate: {
+        nextOpportunityAt: NOW + 111000,
+        nextClaimCheckAt: NOW + 222000,
+      },
+    });
   });
 
   it("dedupes concurrent runs", async () => {

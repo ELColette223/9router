@@ -82,6 +82,9 @@ async function runMaintenance(connection, proxyOptions) {
   let nextClaimCheckAt = psd.zcodeNextClaimCheckAt ?? null;
   let status = null;
   let balance = null;
+  let balanceAttempted = false;
+  let balanceSucceeded = false;
+  let balanceError = null;
 
   try {
     const settings = await getSettings();
@@ -103,10 +106,13 @@ async function runMaintenance(connection, proxyOptions) {
   // Display: weekend buckets require the OAuth JWT plus an installation-local device identity.
   // Balance failures neither set nor clear the expired-session flag.
   try {
+    balanceAttempted = true;
     const deviceMid = await getOrCreateZcodeDeviceMid();
     balance = await fetchZcodePlanBalance({ zcodeJwt, deviceMid, proxyOptions });
+    balanceSucceeded = true;
   } catch (error) {
-    console.warn(`[ZcodeMaintenance] ${id}: plan balance failed: ${error?.message}`);
+    balanceError = typeof error?.message === "string" ? error.message : null;
+    console.warn(`[ZcodeMaintenance] ${id}: plan balance failed: ${balanceError}`);
   }
 
   // Gate 1: request reset opportunities (one call covers both reset types).
@@ -230,7 +236,18 @@ async function runMaintenance(connection, proxyOptions) {
     }
   }
 
-  const enrichment = buildEnrichment({ balance, status, claimState, sessionExpired, autoClaim });
+  const enrichment = buildEnrichment({
+    balance,
+    balanceAttempted,
+    balanceSucceeded,
+    balanceError,
+    status,
+    claimState,
+    sessionExpired,
+    autoClaim,
+    nextOpportunityAt,
+    nextClaimCheckAt,
+  });
   g.cache.set(id, { at: Date.now(), enrichment });
   return enrichment;
 }
@@ -244,15 +261,27 @@ function summarizeResets(resets) {
   };
 }
 
-function buildEnrichment({ balance, status, claimState, sessionExpired, autoClaim }) {
+function buildEnrichment({
+  balance,
+  balanceAttempted = false,
+  balanceSucceeded = false,
+  balanceError = null,
+  status,
+  claimState,
+  sessionExpired,
+  autoClaim,
+  nextOpportunityAt = null,
+  nextClaimCheckAt = null,
+}) {
   const weekendPlanIds = new Set(
     (Array.isArray(balance?.plans) ? balance.plans : [])
-      .filter((plan) => plan?.planId != null && WEEKEND_PLAN_RE.test(plan?.name || ""))
+      .filter((plan) => plan?.planId != null && plan?.status === "active" && WEEKEND_PLAN_RE.test(plan?.name || ""))
       .map((plan) => plan.planId),
   );
+  const balanceBuckets = Array.isArray(balance?.balances) ? balance.balances : [];
 
   const quotas = {};
-  for (const bucket of Array.isArray(balance?.balances) ? balance.balances : []) {
+  for (const bucket of balanceBuckets) {
     if (!weekendPlanIds.has(bucket?.planId)) continue;
     const total = bucket?.totalUnits ?? 0;
     const remaining = bucket?.remainingUnits ?? 0;
@@ -277,6 +306,17 @@ function buildEnrichment({ balance, status, claimState, sessionExpired, autoClai
         week: summarizeResets(status?.week),
       },
       claim: { ...DEFAULT_CLAIM_STATE, ...(claimState || {}), autoClaim },
+      codingPlan: {
+        balance: {
+          status: balanceSucceeded ? "available" : balanceAttempted ? "error" : "unavailable",
+          activeWeekendBucketCount: balanceBuckets.filter((bucket) => weekendPlanIds.has(bucket?.planId)).length,
+          error: balanceError,
+        },
+        gate: {
+          nextOpportunityAt,
+          nextClaimCheckAt,
+        },
+      },
       sessionExpired,
     },
   };
@@ -285,9 +325,13 @@ function buildEnrichment({ balance, status, claimState, sessionExpired, autoClai
 function emptyEnrichment(psd = {}) {
   return buildEnrichment({
     balance: null,
+    balanceAttempted: false,
+    balanceError: null,
     status: null,
     claimState: psd?.zcodeClaimState ?? null,
     sessionExpired: psd?.zcodeSessionExpired === true,
     autoClaim: true,
+    nextOpportunityAt: psd?.zcodeNextOpportunityAt ?? null,
+    nextClaimCheckAt: psd?.zcodeNextClaimCheckAt ?? null,
   });
 }
